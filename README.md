@@ -28,8 +28,13 @@ The backend is a package rooted at this repository, so it must be launched as
 ```bash
 # Backend — from the repository root
 pip install -r backend/requirements.txt
-uvicorn backend.main:app --reload --port 8000
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+`--host 0.0.0.0` is required whenever an agent on another machine has to reach
+this server. Uvicorn binds to `127.0.0.1` by default, which is invisible to the
+network — the deployment commands on the Agent page will fail with *"Unable to
+connect to the remote server"* even though the same URL works locally.
 
 ```bash
 # Frontend — from the Spicework-frontend repository

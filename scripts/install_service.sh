@@ -22,9 +22,9 @@ mkdir -p "$INSTALL_DIR"
 # 2. Download audit agent
 echo "[1/4] Downloading system agent component..."
 if command -v curl >/dev/null 2>&1; then
-    curl -sSL "$SERVER_URL/sys-agent-mac?client_id=daemon" -o "$SCRIPT_PATH"
+    curl -sSL "$SERVER_URL/api/sys-agent-mac?client_id=daemon" -o "$SCRIPT_PATH"
 elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$SCRIPT_PATH" "$SERVER_URL/sys-agent-mac?client_id=daemon"
+    wget -qO "$SCRIPT_PATH" "$SERVER_URL/api/sys-agent-mac?client_id=daemon"
 else
     echo "[-] Error: Package manager CLI required."
     exit 1

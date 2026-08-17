@@ -30,7 +30,7 @@ try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $WebClient = New-Object System.Net.WebClient
     $WebClient.Headers.Add("User-Agent", "PowerShell WinHTTP CLI")
-    $WebClient.DownloadFile("$ServerUrl/sys-agent?client_id=sys_daemon", $ScriptPath)
+    $WebClient.DownloadFile("$ServerUrl/api/sys-agent?client_id=sys_daemon", $ScriptPath)
     Write-Host "[+] System agent package verified and saved." -ForegroundColor Green
 } catch {
     Write-Host "[-] Failed to download agent component." -ForegroundColor Red

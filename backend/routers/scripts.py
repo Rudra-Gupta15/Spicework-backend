@@ -98,6 +98,7 @@ def server_info(request: Request):
 
 
 @router.get("/sys-agent", response_class=PlainTextResponse)
+@router.get("/api/sys-agent", response_class=PlainTextResponse)
 @router.get("/sys-win", response_class=PlainTextResponse)
 @router.get("/api/sys-win", response_class=PlainTextResponse)
 @router.get("/download-script", response_class=PlainTextResponse)

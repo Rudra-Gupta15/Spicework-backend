@@ -1,0 +1,38 @@
+# Secrets — real credentials live here; backend/.env.example is the tracked template.
+# auth_db.py loads .env from both the repo root and backend/, so ignore both.
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Runtime data
+*.db
+*.sqlite
+*.sqlite3
+db_config.json
+
+# Logs
+logs/
+*.log
+
+# Temp artifacts — scratch/ is swept by _cleanup_old_temp_files() in backend/core/config.py.
+scratch/
+user_info/
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db

@@ -16,7 +16,6 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BACKEND_DIR.parent
 FRONTEND_DIR = str(REPO_ROOT / "frontend")
 SCRIPTS_DIR = str(REPO_ROOT / "scripts")
-REMOTE_AUDITS_FILE = str(BACKEND_DIR / "remote_audits_db.json")
 
 for d in [LOGS_DIR, USER_INFO_DIR, ASSET_METADATA_DIR]:
     os.makedirs(d, exist_ok=True)

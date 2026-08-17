@@ -29,6 +29,7 @@ router = APIRouter()
 
 
 @router.post("/upload-audit")
+@router.post("/api/upload-audit")
 def upload_audit(data: AuditData, client_id: str = Query(None)):
     cid = client_id or "unknown"
     logger.info(f"Uploading audit for client: {cid}")
@@ -490,6 +491,7 @@ def upload_audit(data: AuditData, client_id: str = Query(None)):
 
 
 @router.get("/download-report")
+@router.get("/api/download-report")
 def download_report(client_id: str = Query(...), format: str = Query("pdf"), action: str = Query("download")):
     fp = None
     session = sessions.get(client_id)

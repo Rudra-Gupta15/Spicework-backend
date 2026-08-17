@@ -284,6 +284,7 @@ def connect_wifi(req: WifiConnectRequest):
 
 
 @router.get("/wifi/scan-devices")
+@router.get("/api/wifi/scan-devices")
 def wifi_scan_devices(subnet: str = Query(None)):
     """Scan the WiFi subnet and enrich results with stored audit data."""
     if not subnet:

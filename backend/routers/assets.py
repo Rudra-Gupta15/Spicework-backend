@@ -11,6 +11,7 @@ router = APIRouter()
 
 
 @router.post("/asset-metadata")
+@router.post("/api/asset-metadata")
 def save_asset_metadata(metadata: AssetMetadata):
     metadata.last_updated = datetime.now().isoformat()
     try:
@@ -24,6 +25,7 @@ def save_asset_metadata(metadata: AssetMetadata):
 
 
 @router.get("/asset-metadata/{device_id}")
+@router.get("/api/asset-metadata/{device_id}")
 def get_asset_metadata(device_id: str):
     row = legacy_db.get_asset_metadata(device_id)
     if not row:
@@ -32,6 +34,7 @@ def get_asset_metadata(device_id: str):
 
 
 @router.put("/asset-metadata/{device_id}")
+@router.put("/api/asset-metadata/{device_id}")
 def update_asset_metadata(device_id: str, metadata: AssetMetadata):
     metadata.device_id = device_id
     metadata.last_updated = datetime.now().isoformat()
@@ -41,6 +44,7 @@ def update_asset_metadata(device_id: str, metadata: AssetMetadata):
 
 
 @router.delete("/asset-metadata/{device_id}")
+@router.delete("/api/asset-metadata/{device_id}")
 def delete_asset_metadata(device_id: str):
     if not legacy_db.delete_asset_metadata(device_id):
         raise HTTPException(status_code=404, detail="Asset not found.")
@@ -48,6 +52,7 @@ def delete_asset_metadata(device_id: str):
 
 
 @router.get("/assets")
+@router.get("/api/assets")
 def list_assets():
     assets = legacy_db.list_asset_metadata()
     return {"assets": assets, "total": len(assets)}

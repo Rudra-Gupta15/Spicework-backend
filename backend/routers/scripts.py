@@ -47,9 +47,27 @@ def check_status(client_id: str = Query(...)):
 
 
 def get_effective_base_url(request: Request) -> str:
-    """Return the public base URL, supporting Cloudflare Tunnels and HTTPS reverse proxies."""
-    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    """Return the public base URL, supporting Cloudflare Tunnels and HTTPS reverse proxies.
+
+    Reverse proxies commonly forward the host *without* the public port
+    (`X-Forwarded-Host: 1.2.3.4` for a service published on :8010). Left as-is
+    that makes every URL baked into the scripts and launchers drop the port and
+    hit :80. So when the resolved host carries no port, re-attach it from
+    `X-Forwarded-Port` (what the proxy should send), falling back to the port the
+    request came in on. Default ports (80/443) are left off so tunnels stay clean.
+    """
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
     host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+    host = host.split(",")[0].strip()
+
+    if ":" not in host:
+        port = request.headers.get("x-forwarded-port", "").split(",")[0].strip()
+        if not port and request.url.port:
+            port = str(request.url.port)
+        is_default = (proto == "http" and port == "80") or (proto == "https" and port == "443")
+        if port and not is_default:
+            host = f"{host}:{port}"
+
     return f"{proto}://{host}".rstrip("/")
 
 

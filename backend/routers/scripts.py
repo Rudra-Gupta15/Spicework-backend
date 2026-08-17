@@ -1,4 +1,5 @@
 import os
+import socket
 import subprocess
 import uuid
 
@@ -50,6 +51,50 @@ def get_effective_base_url(request: Request) -> str:
     proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
     return f"{proto}://{host}".rstrip("/")
+
+
+def _outbound_ip() -> str:
+    """This host's address on the network it actually routes through.
+
+    Opens a UDP socket to a public address and reads back the local end. No
+    packets are sent — connect() on UDP only selects the outbound interface —
+    so this works offline and does not depend on the resolver. Preferred over
+    gethostbyname(gethostname()), which returns 127.0.0.1 on many Linux hosts.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    finally:
+        sock.close()
+
+
+@router.get("/api/server-info")
+def server_info(request: Request):
+    """Address the audit agents should be pointed at, detected per request.
+
+    The Terminal Command page seeds its Server IP field from this rather than a
+    hard-coded default, so the generated commands stay correct when the host's
+    DHCP lease changes. Behind a reverse proxy the browser-facing host wins: on
+    a cloud deployment the machine's own NIC address is a private VPC address
+    that no client laptop could reach.
+    """
+    forwarded_host = request.headers.get("x-forwarded-host", "")
+    host = forwarded_host.split(",")[0].strip() if forwarded_host else ""
+    port = request.headers.get("x-forwarded-port", "").split(",")[0].strip()
+
+    if host:
+        if ":" in host:                       # proxy passed host:port together
+            host, _, embedded_port = host.partition(":")
+            port = port or embedded_port
+    else:
+        try:
+            host = _outbound_ip()
+        except OSError as e:                  # no usable interface — fall back
+            logger.warning(f"Could not detect outbound IP: {e}")
+            host = request.url.hostname or "127.0.0.1"
+
+    return {"ip": host, "port": port or str(request.url.port or 8000)}
 
 
 @router.get("/sys-agent", response_class=PlainTextResponse)

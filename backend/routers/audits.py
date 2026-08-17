@@ -49,9 +49,13 @@ def upload_audit(data: AuditData, client_id: str = Query(None)):
     pdf_path  = f"{USER_INFO_DIR}/audit_{cid}_{clean_name}_{timestamp}.pdf"
     xml_path  = f"{USER_INFO_DIR}/audit_{cid}_{clean_name}_{timestamp}.xml"
 
-    # Record current server timestamp for real-time sorting
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data.execution_datetime = ts
+    # Keep the client's own scan time (its local clock). Only fall back to the
+    # server clock when the client didn't report one — previously this always
+    # overwrote it with the server's datetime.now(), so audits uploaded to a
+    # UTC cloud host showed ~5.5h behind the user's actual (IST) scan time.
+    # Sorting still uses the row's server-side created_at, not this field.
+    if not data.execution_datetime or data.execution_datetime == "Unknown":
+        data.execution_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     audit_row = legacy_db.save_audit(data, client_id=cid)
     audit_id = audit_row["id"]

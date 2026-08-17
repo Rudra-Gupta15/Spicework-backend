@@ -1,0 +1,55 @@
+name: Deploy Spicework Backend to UAT
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy Backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to UAT
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.UAT_HOST }}
+          username: ${{ secrets.UAT_USER }}
+          key: ${{ secrets.UAT_SSH_KEY }}
+          script: |
+            set -e
+
+            cd /var/www/spicework/Spicework-backend
+
+            echo "Updating backend source..."
+            git fetch origin
+            git reset --hard origin/main
+
+            echo "Checking Python environment..."
+            test -x backend/venv/bin/python
+
+            echo "Installing backend dependencies..."
+            backend/venv/bin/python -m pip install -r backend/requirements.txt
+
+            echo "Restarting Spicework backend..."
+
+            sudo -u sarthak pm2 restart spicework-backend
+
+            echo "Waiting for backend..."
+            sleep 5
+
+            echo "Checking backend..."
+            curl -f http://127.0.0.1:8001/docs > /dev/null
+
+            echo "Backend health check passed."
+
+            echo "Checking frontend..."
+            curl -f http://127.0.0.1:8010/login > /dev/null
+
+            echo "Deployment completed successfully."

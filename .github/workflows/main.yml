@@ -1,55 +1,45 @@
-name: Deploy Spicework Backend to UAT
+name: Deploy Spicework Backend
 
 on:
   push:
     branches:
       - main
 
-  workflow_dispatch:
-
 jobs:
   deploy:
-    name: Deploy Backend
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Deploy to UAT
+      - name: Deploy backend to UAT
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.UAT_HOST }}
-          username: ${{ secrets.UAT_USER }}
-          key: ${{ secrets.UAT_SSH_KEY }}
+          username: sarthak
+          key: ${{ secrets.UAT_SSH_PRIVATE_KEY }}
           script: |
             set -e
 
             cd /var/www/spicework/Spicework-backend
 
-            echo "Updating backend source..."
-            git fetch origin
-            git reset --hard origin/main
+            echo "===== Current User ====="
+            whoami
 
-            echo "Checking Python environment..."
-            test -x backend/venv/bin/python
+            echo "===== Git Status ====="
+            git status
 
-            echo "Installing backend dependencies..."
-            backend/venv/bin/python -m pip install -r backend/requirements.txt
+            echo "===== Pull Latest Code ====="
+            git pull origin main
 
-            echo "Restarting Spicework backend..."
+            echo "===== Activate Python Environment ====="
+            source backend/venv/bin/activate
 
-            sudo -u sarthak pm2 restart spicework-backend
+            echo "===== Install Dependencies ====="
+            pip install -r backend/requirements.txt
 
-            echo "Waiting for backend..."
-            sleep 5
+            echo "===== Restart PM2 ====="
+            pm2 restart spicework-backend
 
-            echo "Checking backend..."
-            curl -f http://127.0.0.1:8001/docs > /dev/null
+            echo "===== PM2 Status ====="
+            pm2 status
 
-            echo "Backend health check passed."
-
-            echo "Checking frontend..."
-            curl -f http://127.0.0.1:8010/login > /dev/null
-
-            echo "Deployment completed successfully."
+            echo "===== Deployment Completed ====="

@@ -1,0 +1,62 @@
+name: Deploy Spicework Backend
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy backend to UAT
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.UAT_HOST }}
+          username: sarthak
+          key: ${{ secrets.UAT_SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            echo "===== Current User ====="
+            whoami
+
+            echo "===== Server ====="
+            hostname
+
+            echo "===== Go to Project ====="
+            cd /var/www/spicework/Spicework-backend
+
+            echo "===== Git Status Before Deployment ====="
+            git status --short
+
+            echo "===== Verify Environment File ====="
+            if [ ! -f .env ]; then
+              echo "ERROR: .env file is missing!"
+              exit 1
+            fi
+
+            echo ".env exists and will be preserved."
+
+            echo "===== Pull Latest Code ====="
+            git pull origin main
+
+            echo "===== Verify Python Environment ====="
+            test -x backend/venv/bin/python
+            backend/venv/bin/python --version
+
+            echo "===== Install Dependencies ====="
+            backend/venv/bin/pip install -r backend/requirements.txt
+
+            echo "===== Restart PM2 ====="
+            pm2 restart spicework-backend --update-env
+
+            echo "===== PM2 Status ====="
+            pm2 status
+
+            echo "===== Health Check ====="
+            sleep 3
+            curl -f http://127.0.0.1:8001/docs > /dev/null
+
+            echo "===== Deployment Completed Successfully ====="

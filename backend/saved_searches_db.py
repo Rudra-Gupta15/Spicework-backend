@@ -24,14 +24,39 @@ def create_saved_search(
 ) -> dict:
     with get_inventory_db() as conn:
         cur = _dict_cursor(conn)
-        cur.execute(f"""
-            INSERT INTO saved_searches
-                (category, name, scope, applied_filters, filter_state, results_count, created_by)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            RETURNING {_COLUMNS}
-        """, (category, name, scope, psycopg2.extras.Json(applied_filters),
-              psycopg2.extras.Json(filter_state) if filter_state is not None else None,
-              results_count, created_by))
+        filters_json = psycopg2.extras.Json(applied_filters)
+        state_json = psycopg2.extras.Json(filter_state) if filter_state is not None else None
+
+        # Saving the same query twice should not leave two rows. Unfiltered
+        # saves are all named "All <category> — <today>", so pressing Save
+        # Filter five times in a day produced five identical entries with
+        # nothing to tell them apart. Re-saving now refreshes the one that is
+        # already there. Matching on name rather than on the filters keeps a
+        # renamed search distinct, which is the only way a person has to say
+        # "keep both of these".
+        cur.execute("""
+            SELECT id FROM saved_searches
+             WHERE category = %s AND LOWER(TRIM(name)) = LOWER(TRIM(%s))
+             LIMIT 1
+        """, (category, name))
+        existing = cur.fetchone()
+
+        if existing:
+            cur.execute(f"""
+                UPDATE saved_searches
+                   SET scope = %s, applied_filters = %s, filter_state = %s,
+                       results_count = %s, created_by = %s, created_at = CURRENT_TIMESTAMP
+                 WHERE id = %s
+                RETURNING {_COLUMNS}
+            """, (scope, filters_json, state_json, results_count, created_by, existing["id"]))
+        else:
+            cur.execute(f"""
+                INSERT INTO saved_searches
+                    (category, name, scope, applied_filters, filter_state, results_count, created_by)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING {_COLUMNS}
+            """, (category, name, scope, filters_json, state_json, results_count, created_by))
+
         row = dict(cur.fetchone())
         conn.commit()
         return row

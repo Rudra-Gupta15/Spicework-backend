@@ -382,27 +382,41 @@ curl.exe -s "{server_url}/api/get-audit-script?client_id={client_id}" -o "$env:T
     raise HTTPException(status_code=500, detail={"message": "All attempted remote execution methods failed.", "errors": results})
 
 
-pending_scan_triggers = set()
-
-
 @router.post("/api/trigger-scan/{device_id}")
 def trigger_immediate_scan(device_id: str):
-    logger.info(f"Manual force-scan requested for device: {device_id}")
-    clean_id = device_id.strip().lower()
-    pending_scan_triggers.add(clean_id)
-    pending_scan_triggers.add("ALL")
+    """
+    Ask one machine to scan now rather than waiting for its next scheduled run.
+
+    The agent polls for this; it cannot be pushed to, since it sits behind its
+    office's NAT. `device_id` is whatever the inventory routes on (a MAC, or a
+    computer name), but the agent only knows its own hostname — so resolve the
+    computer name here and flag against that.
+    """
+    audit = legacy_db.get_latest_audit(device_id)
+    computer_name = (audit or {}).get("computer_name") or device_id
+
+    try:
+        legacy_db.request_scan(device_id=device_id, computer_name=computer_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    logger.info(f"Scan requested for {computer_name} (routed as {device_id})")
     return {
         "status": "triggered",
         "device_id": device_id,
-        "message": f"Scan signal initiated for {device_id}. Target agent will execute scan immediately."
+        "computer_name": computer_name,
+        "message": f"{computer_name} will scan on its next check-in.",
     }
 
 
 @router.get("/api/check-trigger")
 def check_trigger(device_name: str = Query(...)):
-    triggered = False
-    if pending_scan_triggers:
-        triggered = True
-        pending_scan_triggers.clear()
-        logger.info(f"Trigger delivered to checking daemon: {device_name}")
-    return {"trigger": triggered}
+    """
+    Whether this machine has been asked to scan. Claiming is per-device and
+    one-shot.
+
+    The previous implementation returned true whenever *any* trigger was
+    pending and then cleared them all, so asking device A to rescan made
+    whichever agent polled first scan instead — and A never heard about it.
+    """
+    return {"trigger": legacy_db.claim_scan_trigger(device_name)}

@@ -56,12 +56,41 @@ try {
 # server simply means the last known-good copy runs again.
 $RunnerPath = Join-Path $InstallDir "runner.ps1"
 $RunnerBody = @'
-$InstallDir = Join-Path $env:LOCALAPPDATA "InfraPulse"
-$ScriptPath = Join-Path $InstallDir "audit.ps1"
-$ServerUrl  = "__SERVER_URL__"
+$InstallDir    = Join-Path $env:LOCALAPPDATA "InfraPulse"
+$ScriptPath    = Join-Path $InstallDir "audit.ps1"
+$StampPath     = Join-Path $InstallDir "last_run.txt"
+$ServerUrl     = "__SERVER_URL__"
+$IntervalHours = 2
+
+# The task fires every couple of minutes, but a scan is expensive, so decide
+# here whether one is actually due. Two reasons to run: somebody pressed Rescan
+# in the portal, or the scheduled interval has elapsed. An agent cannot be
+# reached inbound from the portal — it sits behind its office's NAT — so the
+# on-demand path is this poll rather than a push.
+$shouldScan = $false
+$reason     = ""
 
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $check = Invoke-RestMethod -TimeoutSec 15 `
+        -Uri "$ServerUrl/api/check-trigger?device_name=$([Uri]::EscapeDataString($env:COMPUTERNAME))"
+    if ($check.trigger) { $shouldScan = $true; $reason = "requested from portal" }
+} catch {}
+
+if (-not $shouldScan) {
+    $last = $null
+    if (Test-Path $StampPath) {
+        try { $last = [DateTime]::Parse((Get-Content $StampPath -Raw).Trim()) } catch {}
+    }
+    if ($null -eq $last -or ((Get-Date) - $last).TotalHours -ge $IntervalHours) {
+        $shouldScan = $true; $reason = "scheduled"
+    }
+}
+
+if (-not $shouldScan) { return }
+
+# Refresh the agent so server-side fixes reach this machine without a reinstall.
+try {
     $Tmp = "$ScriptPath.new"
     $wc = New-Object System.Net.WebClient
     $wc.Headers.Add("User-Agent", "PowerShell WinHTTP CLI")
@@ -75,6 +104,9 @@ try {
 } catch {}
 
 if (Test-Path $ScriptPath) {
+    # Stamp before running, not after: a scan that dies partway must not leave
+    # the machine retrying every two minutes forever.
+    Set-Content -Path $StampPath -Value (Get-Date).ToString("o") -Encoding ASCII
     & powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File $ScriptPath
 }
 '@
@@ -85,7 +117,10 @@ Write-Host "[3/4] Registering 2-Hour Auto-Audit Scheduled Task..." -ForegroundCo
 
 $TaskName = "InfraPulseAuditDaemon"
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$RunnerPath`""
-$Trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 120)
+# Fires every 2 minutes; the runner decides whether a scan is actually due.
+# The cadence is the poll for portal-requested rescans, not the scan interval
+# itself, which the runner still holds at 2 hours.
+$Trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 2)
 
 try {
     # Unregister existing task if present
@@ -94,7 +129,7 @@ try {
     Write-Host "[+] Scheduled Task '$TaskName' registered successfully (Repeats every 2 hours)." -ForegroundColor Green
 } catch {
     # Fallback to schtasks.exe if PowerShell cmdlets fail
-    $SchCmd = "schtasks /create /tn `"$TaskName`" /tr `"powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File `\`"$RunnerPath`\`"`" /sc minute /mo 120 /f"
+    $SchCmd = "schtasks /create /tn `"$TaskName`" /tr `"powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File `\`"$RunnerPath`\`"`" /sc minute /mo 2 /f"
     Invoke-Expression $SchCmd | Out-Null
     Write-Host "[+] Scheduled Task '$TaskName' registered via schtasks (Repeats every 2 hours)." -ForegroundColor Green
 }

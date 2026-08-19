@@ -676,3 +676,80 @@ def delete_ticket(ticket_id: str) -> bool:
         deleted = cur.rowcount > 0
         conn.commit()
         return deleted
+
+
+# ── On-demand rescan triggers ────────────────────────────────────────────────
+#
+# An agent cannot be reached inbound: it lives behind whatever NAT its office
+# has. So "Rescan" leaves a flag here and the machine's own watcher collects it
+# on its next poll. Kept in the database rather than in memory because the
+# previous in-process set lost every pending trigger on restart, and could not
+# be seen by a second uvicorn worker.
+
+_TRIGGER_TTL_MINUTES = 30
+
+
+def request_scan(device_id: str, computer_name: str = None, requested_by: str = None) -> dict:
+    """
+    Flag one device for an immediate scan.
+
+    Keyed on the computer name because that is the only identifier the agent
+    knows about itself when it polls — it reports `hostname`, not the MAC or
+    the id this portal happens to route on.
+    """
+    key = (computer_name or device_id or "").strip().lower()
+    if not key:
+        raise ValueError("A device name or id is required to request a scan.")
+
+    with get_inventory_db() as conn:
+        cur = _dict_cursor(conn)
+        cur.execute("""
+            INSERT INTO scan_triggers (device_key, device_id, requested_by, requested_at, delivered_at)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP, NULL)
+            ON CONFLICT (device_key) DO UPDATE SET
+                device_id    = EXCLUDED.device_id,
+                requested_by = EXCLUDED.requested_by,
+                requested_at = CURRENT_TIMESTAMP,
+                delivered_at = NULL
+            RETURNING device_key, device_id, requested_at
+        """, (key, device_id, requested_by))
+        row = dict(cur.fetchone())
+        conn.commit()
+        return row
+
+
+def claim_scan_trigger(device_name: str) -> bool:
+    """
+    True when this machine has an undelivered scan request, claiming it so the
+    next poll does not scan again.
+
+    Requests older than the TTL are ignored: a machine that was offline for a
+    week should not launch a scan the moment it reappears, long after whoever
+    asked has stopped watching for the result.
+    """
+    key = (device_name or "").strip().lower()
+    if not key:
+        return False
+
+    with get_inventory_db() as conn:
+        cur = _dict_cursor(conn)
+        cur.execute("""
+            UPDATE scan_triggers
+               SET delivered_at = CURRENT_TIMESTAMP
+             WHERE device_key = %s
+               AND delivered_at IS NULL
+               AND requested_at > CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
+            RETURNING device_key
+        """, (key, _TRIGGER_TTL_MINUTES))
+        claimed = cur.fetchone() is not None
+        conn.commit()
+        return claimed
+
+
+def get_scan_trigger(device_id: str, computer_name: str = None):
+    key = (computer_name or device_id or "").strip().lower()
+    with get_inventory_db() as conn:
+        cur = _dict_cursor(conn)
+        cur.execute("SELECT device_key, device_id, requested_at, delivered_at FROM scan_triggers WHERE device_key = %s", (key,))
+        row = cur.fetchone()
+        return dict(row) if row else None

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -15,6 +15,11 @@ class CreateSavedSearchRequest(BaseModel):
     applied_filters: list[str] = []
     results_count: int = 0
     created_by: str = "Unknown"
+    # The filter bar's own state, kept so the search can be re-run against
+    # current data. `applied_filters` is the human-readable rendering of the
+    # same thing and cannot be parsed back reliably — a formatted date range
+    # ("1 Aug 2026 - 19 Aug 2026") does not survive the round trip.
+    filter_state: Optional[dict[str, Any]] = None
 
 
 @router.get("/api/saved-searches")
@@ -31,6 +36,7 @@ def create_saved_search(data: CreateSavedSearchRequest):
         applied_filters=data.applied_filters,
         results_count=data.results_count,
         created_by=data.created_by,
+        filter_state=data.filter_state,
     )
 
 

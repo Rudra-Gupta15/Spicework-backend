@@ -9,7 +9,8 @@ import psycopg2.extras
 
 from backend.auth_db import _dict_cursor, get_inventory_db
 
-_COLUMNS = "id, category, name, scope, applied_filters, results_count, created_by, created_at"
+_COLUMNS = ("id, category, name, scope, applied_filters, filter_state, "
+            "results_count, created_by, created_at")
 
 
 def create_saved_search(
@@ -19,14 +20,18 @@ def create_saved_search(
     applied_filters: list,
     results_count: int,
     created_by: str,
+    filter_state: dict = None,
 ) -> dict:
     with get_inventory_db() as conn:
         cur = _dict_cursor(conn)
         cur.execute(f"""
-            INSERT INTO saved_searches (category, name, scope, applied_filters, results_count, created_by)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO saved_searches
+                (category, name, scope, applied_filters, filter_state, results_count, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING {_COLUMNS}
-        """, (category, name, scope, psycopg2.extras.Json(applied_filters), results_count, created_by))
+        """, (category, name, scope, psycopg2.extras.Json(applied_filters),
+              psycopg2.extras.Json(filter_state) if filter_state is not None else None,
+              results_count, created_by))
         row = dict(cur.fetchone())
         conn.commit()
         return row

@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend import devices_db
 from backend.core.config import SCRIPTS_DIR, logger
 from backend.core.state import sessions
 
@@ -49,26 +50,98 @@ def check_status(client_id: str = Query(...)):
 def get_effective_base_url(request: Request) -> str:
     """Return the public base URL, supporting Cloudflare Tunnels and HTTPS reverse proxies.
 
-    Reverse proxies commonly forward the host *without* the public port
-    (`X-Forwarded-Host: 1.2.3.4` for a service published on :8010). Left as-is
-    that makes every URL baked into the scripts and launchers drop the port and
-    hit :80. So when the resolved host carries no port, re-attach it from
-    `X-Forwarded-Port` (what the proxy should send), falling back to the port the
-    request came in on. Default ports (80/443) are left off so tunnels stay clean.
+    Every generated script and launcher bakes this in as the address agents call
+    home on, so it must be the URL the *client* can reach, never the origin's.
+
+    Port handling is the subtle part. A proxy that publishes on a non-default
+    port forwards the host without it (`X-Forwarded-Host: 1.2.3.4` for a service
+    on :8010) and names the port separately in `X-Forwarded-Port`, so that has to
+    be re-attached. But a tunnel on 443 sends no `X-Forwarded-Port` at all — and
+    there the origin's own port must NOT be substituted, or the URL points at a
+    port the client cannot open.
     """
-    proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
-    host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+    def _first(header: str) -> str:
+        return request.headers.get(header, "").split(",")[0].strip()
+
+    forwarded_proto = _first("x-forwarded-proto")
+    forwarded_host = _first("x-forwarded-host")
+    forwarded_port = _first("x-forwarded-port")
+    behind_proxy = bool(forwarded_proto or forwarded_host or forwarded_port)
+
+    proto = forwarded_proto or request.url.scheme
+    host = forwarded_host or request.headers.get("host") or request.url.netloc
     host = host.split(",")[0].strip()
 
     if ":" not in host:
-        port = request.headers.get("x-forwarded-port", "").split(",")[0].strip()
-        if not port and request.url.port:
-            port = str(request.url.port)
+        # Port precedence, most trustworthy first. Everything here describes the
+        # port the *client* connected to; the origin's own listen port is only
+        # usable when no proxy is involved.
+        _, _, host_header_port = (request.headers.get("host") or "").partition(":")
+
+        if forwarded_port:
+            port = forwarded_port
+        elif host_header_port:
+            # nginx's usual `proxy_set_header Host $host` keeps the client's
+            # host:port even when X-Forwarded-Host is sent without one, so this
+            # recovers the public port for setups published on e.g. :8010.
+            port = host_header_port.strip()
+        elif behind_proxy:
+            # A proxy terminated the connection and named no port anywhere, so it
+            # is publishing on the scheme's default. request.url.port here is the
+            # *internal* origin port (e.g. 8000) — appending it produced URLs like
+            # https://tunnel.example.com:8000 that no client can reach, breaking
+            # every generated script and launcher.
+            port = ""
+        else:
+            port = str(request.url.port) if request.url.port else ""
+
         is_default = (proto == "http" and port == "80") or (proto == "https" and port == "443")
         if port and not is_default:
             host = f"{host}:{port}"
 
     return f"{proto}://{host}".rstrip("/")
+
+
+def register_launcher_download(cid: str, company: str, city: str, site: str, launcher_type: str) -> dict:
+    """
+    Persist where a downloaded launcher is destined, keyed by its client_id.
+
+    The "Before you download" modal asks for company/city/site precisely so the
+    audit that comes back can be filed against the right place. Previously these
+    were accepted on the query string and then dropped, and the session was
+    stamped with a hard-coded branch instead — which is why every stored audit
+    reads "RELIGARE BROKING LIMITED" and no device is attributable to a company.
+
+    Storage failures must not block the download: a launcher that runs but is
+    unattributed is recoverable, one that never downloads is not.
+    """
+    record = {"organization_id": None, "site_id": None,
+              "company_name": company, "city_name": city, "site_name": site}
+    try:
+        record = devices_db.save_launcher_registration(
+            client_id=cid, company_name=company, city_name=city,
+            site_name=site, launcher_type=launcher_type,
+        )
+        if not record.get("organization_id") and (company or "").strip():
+            logger.warning(
+                f"Launcher {cid}: company '{company}' matches no organization on record — "
+                "its audits will upload unattributed until the name is corrected."
+            )
+    except Exception as e:
+        logger.error(f"Could not record launcher registration for {cid}: {e}")
+
+    sessions[cid] = {
+        "status": "pending",
+        # The audit's PDF/XML header. Falls back to the previous constant only
+        # when the downloader gave nothing, so existing reports keep their shape.
+        "branch_name": (company or "").strip() or "RELIGARE BROKING LIMITED",
+        "branch_code": (site or "").strip() or "8301231",
+        "officer_name": "SANDIP BALIRAM LOKHANDE",
+        "available_pcs": "1", "registered_pcs": "1",
+        "pdf_path": None, "xml_path": None,
+        "company": company, "city": city, "site": site,
+    }
+    return record
 
 
 def _outbound_ip() -> str:
@@ -137,16 +210,16 @@ def download_script(request: Request, client_id: str = Query(None)):
 @router.get("/download-exe-launcher")
 @router.get("/api/download-exe-launcher")
 @router.get("/download-exe")
-def download_exe_launcher(request: Request, client_id: str = Query(None)):
+def download_exe_launcher(
+    request: Request,
+    client_id: str = Query(None),
+    company: str = Query(""),
+    city: str = Query(""),
+    site: str = Query(""),
+):
     base_url = get_effective_base_url(request)
     cid = client_id or "sys_" + uuid.uuid4().hex[:10]
-    if cid not in sessions:
-        sessions[cid] = {
-            "status": "pending", "branch_name": "RELIGARE BROKING LIMITED",
-            "branch_code": "8301231", "officer_name": "SANDIP BALIRAM LOKHANDE",
-            "available_pcs": "1", "registered_pcs": "1",
-            "pdf_path": None, "xml_path": None,
-        }
+    register_launcher_download(cid, company, city, site, "win-exe")
 
     # Check if csc compiler or pre-compiled exe is available
     exe_filename = f"RunAudit_Windows_{cid}.exe"
@@ -158,7 +231,7 @@ class Program {{
         try {{
             ProcessStartInfo psi = new ProcessStartInfo();
             psi.FileName = "powershell.exe";
-            psi.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -Command \\"Invoke-RestMethod -Uri '{base_url}/sys-agent?client_id={cid}' | Invoke-Expression\\"";
+            psi.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -Command \\"Invoke-RestMethod -Uri '{base_url}/api/sys-agent?client_id={cid}' | Invoke-Expression\\"";
             psi.WindowStyle = ProcessWindowStyle.Hidden;
             psi.CreateNoWindow = true;
             psi.UseShellExecute = false;
@@ -200,7 +273,7 @@ class Program {{
     vbs = (
         f'Set objShell = CreateObject("WScript.Shell")\n'
         f'command = "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -Command " & Chr(34) & '
-        f'"Invoke-RestMethod -Uri \'{base_url}/sys-agent?client_id={cid}\' | Invoke-Expression" & Chr(34)\n'
+        f'"Invoke-RestMethod -Uri \'{base_url}/api/sys-agent?client_id={cid}\' | Invoke-Expression" & Chr(34)\n'
         f'objShell.Run command, 0, False\n'
     )
     headers = {"Content-Disposition": f"attachment; filename=RunAudit_Windows_{cid}.vbs"}
@@ -213,22 +286,17 @@ class Program {{
 def download_vbs(
     request: Request,
     client_id: str = Query(None),
-    branch_name: str = Query("RELIGARE BROKING LIMITED"),
-    branch_code: str = Query("8301231"),
-    officer_name: str = Query("SANDIP BALIRAM LOKHANDE"),
+    company: str = Query(""),
+    city: str = Query(""),
+    site: str = Query(""),
 ):
     base_url = get_effective_base_url(request)
     cid = client_id or "sys_" + uuid.uuid4().hex[:10]
-    sessions[cid] = {
-        "status": "pending", "branch_name": branch_name,
-        "branch_code": branch_code, "officer_name": officer_name,
-        "available_pcs": "1", "registered_pcs": "1",
-        "pdf_path": None, "xml_path": None,
-    }
+    register_launcher_download(cid, company, city, site, "win-vbs")
     vbs = (
         f'Set objShell = CreateObject("WScript.Shell")\n'
         f'command = "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -Command " & Chr(34) & '
-        f'"Invoke-RestMethod -Uri \'{base_url}/sys-agent?client_id={cid}\' | Invoke-Expression" & Chr(34)\n'
+        f'"Invoke-RestMethod -Uri \'{base_url}/api/sys-agent?client_id={cid}\' | Invoke-Expression" & Chr(34)\n'
         f'objShell.Run command, 0, False\n'
     )
     headers = {"Content-Disposition": f"attachment; filename=RunAudit_Windows_{cid}.vbs"}
@@ -237,16 +305,16 @@ def download_vbs(
 
 @router.get("/download-mac-launcher")
 @router.get("/api/download-mac-launcher")
-def download_mac_launcher(request: Request, client_id: str = Query(None)):
+def download_mac_launcher(
+    request: Request,
+    client_id: str = Query(None),
+    company: str = Query(""),
+    city: str = Query(""),
+    site: str = Query(""),
+):
     base_url = get_effective_base_url(request)
     cid = client_id or "sys_" + uuid.uuid4().hex[:10]
-    if cid not in sessions:
-        sessions[cid] = {
-            "status": "pending", "branch_name": "RELIGARE BROKING LIMITED",
-            "branch_code": "8301231", "officer_name": "SANDIP BALIRAM LOKHANDE",
-            "available_pcs": "1", "registered_pcs": "1",
-            "pdf_path": None, "xml_path": None,
-        }
+    register_launcher_download(cid, company, city, site, "macos")
     cmd_content = (
         f'#!/usr/bin/env bash\n'
         f'# Double-click launcher for macOS Finder\n'
@@ -257,7 +325,7 @@ def download_mac_launcher(request: Request, client_id: str = Query(None)):
         f'echo "Starting system audit scan..."\n'
         f'echo ""\n'
         f'TMP_SCRIPT=$(mktemp 2>/dev/null || echo "/tmp/audit_{cid}.sh")\n'
-        f'curl -sSL "{base_url}/sys-agent-mac?client_id={cid}" -o "$TMP_SCRIPT"\n'
+        f'curl -sSL "{base_url}/api/sys-agent-mac?client_id={cid}" -o "$TMP_SCRIPT"\n'
         f'chmod +x "$TMP_SCRIPT"\n'
         f'bash "$TMP_SCRIPT"\n'
         f'rm -f "$TMP_SCRIPT" 2>/dev/null\n'
@@ -271,16 +339,16 @@ def download_mac_launcher(request: Request, client_id: str = Query(None)):
 
 @router.get("/download-linux-launcher")
 @router.get("/api/download-linux-launcher")
-def download_linux_launcher(request: Request, client_id: str = Query(None)):
+def download_linux_launcher(
+    request: Request,
+    client_id: str = Query(None),
+    company: str = Query(""),
+    city: str = Query(""),
+    site: str = Query(""),
+):
     base_url = get_effective_base_url(request)
     cid = client_id or "sys_" + uuid.uuid4().hex[:10]
-    if cid not in sessions:
-        sessions[cid] = {
-            "status": "pending", "branch_name": "RELIGARE BROKING LIMITED",
-            "branch_code": "8301231", "officer_name": "SANDIP BALIRAM LOKHANDE",
-            "available_pcs": "1", "registered_pcs": "1",
-            "pdf_path": None, "xml_path": None,
-        }
+    register_launcher_download(cid, company, city, site, "linux")
     sh_content = (
         f'#!/usr/bin/env bash\n'
         f'# Double-click launcher for Linux Desktop\n'
@@ -291,7 +359,7 @@ def download_linux_launcher(request: Request, client_id: str = Query(None)):
         f'echo "Starting system audit scan..."\n'
         f'echo ""\n'
         f'TMP_SCRIPT=$(mktemp 2>/dev/null || echo "/tmp/audit_{cid}.sh")\n'
-        f'curl -sSL "{base_url}/sys-agent-mac?client_id={cid}" -o "$TMP_SCRIPT"\n'
+        f'curl -sSL "{base_url}/api/sys-agent-mac?client_id={cid}" -o "$TMP_SCRIPT"\n'
         f'chmod +x "$TMP_SCRIPT"\n'
         f'bash "$TMP_SCRIPT"\n'
         f'rm -f "$TMP_SCRIPT" 2>/dev/null\n'

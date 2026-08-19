@@ -147,40 +147,109 @@ try {
     $firewall = if ($fw) { "Enabled" } else { "Disabled" }
 } catch {}
 
+# ---------------------------------------------------------
+# Security posture (BitLocker / Secure Boot / TPM)
+#
+# The primary cmdlets here (Get-BitLockerVolume, Confirm-SecureBootUEFI,
+# Get-Tpm) all require elevation. When the agent runs unelevated they return
+# $null or throw, so each check falls back to a source a standard user CAN
+# read before giving up. Never downgrade "could not determine" into a
+# concrete negative like "Not Present" -- a false clean bill of health on a
+# compliance report is worse than an explicit gap.
+# ---------------------------------------------------------
+
 # BitLocker
 $bitlocker = "Unknown"
 try {
-    $bl = Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue
+    $bl = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
     if ($bl -and $bl.VolumeStatus) {
-        $bitlocker = $bl.VolumeStatus.ToString()
-    } else {
-        $bitlocker = "Not Encrypted"
+        $pct = if ($null -ne $bl.EncryptionPercentage) { $bl.EncryptionPercentage } else { 0 }
+        $bitlocker = switch ("$($bl.VolumeStatus)") {
+            "FullyDecrypted" { "Not Encrypted" }
+            "FullyEncrypted" { "Encrypted (" + $bl.EncryptionMethod + ")" }
+            default          { "$($bl.VolumeStatus) ($pct%)" }
+        }
     }
-} catch {
-    $bitlocker = "Not Supported/Unknown"
+} catch {}
+if ($bitlocker -eq "Unknown") {
+    # Elevated WMI provider -- same data, still admin-only, but worth a try.
+    try {
+        $ev = Get-CimInstance -Namespace "root\cimv2\security\MicrosoftVolumeEncryption" `
+                              -ClassName Win32_EncryptableVolume `
+                              -Filter "DriveLetter = 'C:'" -ErrorAction Stop
+        if ($ev) {
+            $bitlocker = if ($ev.ProtectionStatus -eq 1) { "Encrypted" } else { "Not Encrypted" }
+        }
+    } catch {}
 }
+if ($bitlocker -eq "Unknown") {
+    # Readable by standard users: 1 = OS volume is BitLocker-protected.
+    try {
+        $bs = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\BitLockerStatus" -Name "BootStatus" -ErrorAction Stop
+        if ($null -ne $bs.BootStatus) {
+            $bitlocker = if ($bs.BootStatus -eq 1) { "Encrypted" } else { "Not Encrypted" }
+        }
+    } catch {}
+}
+if ($bitlocker -eq "Unknown") { $bitlocker = "Unknown (requires administrator)" }
 
 # Secure Boot
 $secureBoot = "Unknown"
 try {
-    $sb = Confirm-SecureBootUEFI -ErrorAction SilentlyContinue
+    $sb = Confirm-SecureBootUEFI -ErrorAction Stop
     $secureBoot = if ($sb) { "Enabled" } else { "Disabled" }
-} catch {
-    $secureBoot = "Unsupported"
+} catch {}
+if ($secureBoot -eq "Unknown") {
+    # UEFISecureBootEnabled is readable without elevation. The key is absent
+    # entirely on legacy-BIOS machines, which is a real "not supported".
+    try {
+        $sbReg = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State" -Name "UEFISecureBootEnabled" -ErrorAction Stop
+        if ($null -ne $sbReg.UEFISecureBootEnabled) {
+            $secureBoot = if ($sbReg.UEFISecureBootEnabled -eq 1) { "Enabled" } else { "Disabled" }
+        }
+    } catch {
+        if ("$env:firmware_type" -eq "Legacy") {
+            $secureBoot = "Not Supported (Legacy BIOS)"
+        }
+    }
 }
+if ($secureBoot -eq "Unknown") { $secureBoot = "Unknown (requires administrator)" }
 
 # TPM
 $tpm = "Unknown"
 try {
-    $tpmObj = Get-Tpm -ErrorAction SilentlyContinue
-    if ($tpmObj) {
-        $tpm = if ($tpmObj.TpmPresent) { "Present, Enabled: " + $tpmObj.TpmReady } else { "Not Present" }
-    } else {
-        $tpm = "Not Present"
+    $tpmObj = Get-Tpm -ErrorAction Stop
+    # Unelevated, Get-Tpm returns a populated-looking object whose properties are
+    # all $null instead of throwing. A null TpmPresent means "could not read",
+    # NOT "absent" -- only a real boolean is trustworthy here.
+    if ($tpmObj -and $tpmObj.TpmPresent -is [bool]) {
+        $tpm = if ($tpmObj.TpmPresent) {
+            "Present (Ready: " + $tpmObj.TpmReady + ")"
+        } else {
+            "Not Present"
+        }
     }
-} catch {
-    $tpm = "Unsupported"
+} catch {}
+if ($tpm -eq "Unknown") {
+    try {
+        $tpmWmi = Get-CimInstance -Namespace "root\CIMV2\Security\MicrosoftTpm" -ClassName Win32_Tpm -ErrorAction Stop
+        if ($tpmWmi) {
+            $ver = "$($tpmWmi.SpecVersion)".Split(",")[0].Trim()
+            $tpm = "Present (TPM $ver, Enabled: $($tpmWmi.IsEnabled_InitialValue))"
+        }
+    } catch {}
 }
+if ($tpm -eq "Unknown") {
+    # PnP security devices are enumerable by standard users -- enough to prove
+    # presence and firmware version, though not activation state.
+    try {
+        $tpmPnp = Get-CimInstance Win32_PnPEntity -Filter "Name LIKE '%Trusted Platform Module%'" -ErrorAction Stop | Select-Object -First 1
+        if ($tpmPnp) {
+            $tpm = if ($tpmPnp.Status -eq "OK") { "Present ($($tpmPnp.Name))" } else { "Present ($($tpmPnp.Name), Status: $($tpmPnp.Status))" }
+        }
+    } catch {}
+}
+if ($tpm -eq "Unknown") { $tpm = "Unknown (requires administrator)" }
 
 # ---------------------------------------------------------
 # GPU Information
@@ -260,10 +329,20 @@ $moboProduct = Get-SafeString $mobo.Product
 $moboVersion = Get-SafeString $mobo.Version
 $moboSerial = Get-SafeString $mobo.SerialNumber
 
-$assetTag = Get-SafeString $enclosure.SMBIOSAssetTag
-if (!$assetTag -or $assetTag -match 'N/A|No Asset|Default|Fill By OEM|To Be Filled') { $assetTag = Get-SafeString $moboSerial }
-if (!$assetTag -or $assetTag -match 'N/A|No Asset|Default|Fill By OEM|To Be Filled') { $assetTag = Get-SafeString $serialNumber }
-if (!$assetTag -or $assetTag -match 'N/A|No Asset|Default|Fill By OEM|To Be Filled') { $assetTag = "AST-" + $env:COMPUTERNAME }
+# Asset tag: prefer the tag the OEM/organisation actually burned into SMBIOS,
+# then real hardware identifiers. Every candidate below is a value physically
+# readable off the machine -- nothing synthesised, because a fabricated tag is
+# indistinguishable from a real one on a compliance report.
+function Test-PlaceholderValue ($val) {
+    if ([string]::IsNullOrWhiteSpace($val)) { return $true }
+    return ($val -match '^(Unknown|N/A|None|Null|No Asset|Default string|Default|Fill By OEM|To Be Filled|System Serial Number|Not Specified|0+)$') -or
+           ($val -match 'No Asset|Fill By OEM|To Be Filled|Default string')
+}
+
+$assetTag = "Unknown"
+foreach ($candidate in @($enclosure.SMBIOSAssetTag, $moboSerial, $serialNumber)) {
+    if (-not (Test-PlaceholderValue $candidate)) { $assetTag = $candidate.ToString().Trim(); break }
+}
 
 $deviceType = "Desktop"
 try {
@@ -371,23 +450,67 @@ try {
     }
 } catch {}
 
+# Build network_details in the shape the backend's NetworkDetails model expects
+# (ip_address / gateway / mac -- NOT the adapter's ipv4 / mac_address keys).
+# Ordered so the primary adapter is first: consumers read [0] as "the" device IP,
+# so real NICs holding the default gateway must outrank VPN/virtual adapters.
+$networkDetails = @()
+$vpnActive = $false
+$VIRTUAL_NIC_RX = 'VPN|Virtual|TAP-|TAP Windows|Loopback|Hyper-V|VMware|VirtualBox|Bluetooth|WAN Miniport|Pseudo|Tunnel|Teredo|Docker|Npcap'
+try {
+    $ranked = @()
+    foreach ($a in $adapters) {
+        $ip4 = @($a.IPAddress | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' -and $_ -ne '0.0.0.0' })
+        if ($ip4.Count -eq 0) { continue }
+        $gw = @($a.DefaultIPGateway) -join ", "
+        $desc = "$($a.Description)"
+        # Lower rank sorts first: real NIC with a gateway, then real NIC, then virtual.
+        $isVirtual = $desc -match $VIRTUAL_NIC_RX
+        $rank = if (-not $isVirtual -and $gw) { 0 } elseif (-not $isVirtual) { 1 } elseif ($gw) { 2 } else { 3 }
+        $ranked += [PSCustomObject]@{
+            rank = $rank
+            data = @{
+                ip_address = $ip4[0]
+                gateway    = Get-SafeString $gw
+                mac        = Get-SafeString $a.MACAddress
+            }
+        }
+    }
+    foreach ($entry in ($ranked | Sort-Object rank)) { $networkDetails += $entry.data }
+    # If only a virtual/VPN adapter holds a default gateway, outbound traffic is
+    # tunnelled -- any geo-IP lookup would report the tunnel exit, not this desk.
+    $vpnActive = ($ranked.Count -gt 0) -and -not ($ranked | Where-Object { $_.rank -eq 0 })
+    # Adopt the primary adapter's MAC as the device identity rather than whichever
+    # IPEnabled adapter WMI happened to enumerate first (often a VPN tunnel).
+    if ($networkDetails.Count -gt 0 -and $networkDetails[0].mac -ne "Unknown") {
+        $mac = $networkDetails[0].mac
+    }
+} catch {}
+
 # ---------------------------------------------------------
 # Geolocation & Public IP Info
 # ---------------------------------------------------------
 Write-Host "Collecting location information..." -ForegroundColor Cyan
+# Geo-IP locates the internet egress point, which equals the machine's site only
+# when traffic is not tunnelled. Reporting a VPN concentrator's city as the asset
+# location would be a confidently wrong answer, so suppress it in that case.
 $locationInfo = "Location Unavailable"
-try {
-    $geo = Invoke-RestMethod -Uri "http://ip-api.com/json/" -UserAgent "Mozilla/5.0" -TimeoutSec 5 -ErrorAction SilentlyContinue
-    if ($geo -and $geo.status -eq "success") {
-        $locationInfo = "$($geo.city), $($geo.regionName), $($geo.country) (Lat: $($geo.lat), Lon: $($geo.lon) | Public IP: $($geo.query))"
-    } else {
-        $geo2 = Invoke-RestMethod -Uri "https://ipinfo.io/json" -UserAgent "Mozilla/5.0" -TimeoutSec 5 -ErrorAction SilentlyContinue
-        if ($geo2 -and $geo2.city) {
-            $locationInfo = "$($geo2.city), $($geo2.region), $($geo2.country) (Public IP: $($geo2.ip))"
+if ($vpnActive) {
+    $locationInfo = "Location Unavailable (VPN active - geo-IP would report the tunnel exit)"
+} else {
+    try {
+        $geo = Invoke-RestMethod -Uri "http://ip-api.com/json/" -UserAgent "Mozilla/5.0" -TimeoutSec 5 -ErrorAction SilentlyContinue
+        if ($geo -and $geo.status -eq "success") {
+            $locationInfo = "$($geo.city), $($geo.regionName), $($geo.country) (Approx. from public IP $($geo.query))"
+        } else {
+            $geo2 = Invoke-RestMethod -Uri "https://ipinfo.io/json" -UserAgent "Mozilla/5.0" -TimeoutSec 5 -ErrorAction SilentlyContinue
+            if ($geo2 -and $geo2.city) {
+                $locationInfo = "$($geo2.city), $($geo2.region), $($geo2.country) (Approx. from public IP $($geo2.ip))"
+            }
         }
+    } catch {
+        $locationInfo = "Location Unavailable"
     }
-} catch {
-    $locationInfo = "Location Unavailable"
 }
 
 # ---------------------------------------------------------
@@ -508,10 +631,10 @@ try {
     $disks = Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue
     foreach ($d in $disks) {
         $iface = Get-SafeString $d.InterfaceType
-        $model = Get-SafeString $d.Model
-        if ($iface -eq 'USB' -and $model -and $model -notmatch 'Virtual|RAID') {
+        $diskModel = Get-SafeString $d.Model
+        if ($iface -eq 'USB' -and $diskModel -and $diskModel -notmatch 'Virtual|RAID') {
             $peripherals += @{
-                name            = $model
+                name            = $diskModel
                 type            = "Storage"
                 connection_type = "USB Drive"
                 status          = "Mounted"
@@ -1075,7 +1198,7 @@ $data = @{
         usb_history           = $usbHistory
     }
     usb_history           = $usbHistory
-    network_details       = $networkAdapters
+    network_details       = $networkDetails
     user_accounts         = $userAccounts
     software_inventory    = $softwareInventory
     login_history         = $loginHistory

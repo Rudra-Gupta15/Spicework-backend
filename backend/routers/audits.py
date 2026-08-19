@@ -8,7 +8,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from backend import legacy_db
+from backend import devices_db, legacy_db
 from backend.core.config import USER_INFO_DIR, logger
 from backend.core.state import sessions
 from backend.models.audit import AuditData, GpuInfo, HardwareDetails, HotfixData, NetworkDetails, PrinterData, UserAccount
@@ -37,9 +37,16 @@ def upload_audit(data: AuditData, client_id: str = Query(None)):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     clean_name = "".join(x for x in data.computer_name if x.isalnum() or x in "._- ").strip() or "Unknown"
 
+    # Where this machine was registered when its launcher was downloaded. Survives
+    # a server restart (the in-memory `sessions` dict does not), so an audit that
+    # arrives hours or days later is still filed against the right company.
+    origin = devices_db.resolve_audit_origin(cid)
+
     session_meta  = sessions.get(cid, {})
-    branch_name   = session_meta.get("branch_name",   "RELIGARE BROKING LIMITED")
-    branch_code   = session_meta.get("branch_code",   "8301231")
+    branch_name   = (origin.get("company_name")
+                     or session_meta.get("branch_name") or "RELIGARE BROKING LIMITED")
+    branch_code   = (origin.get("site_name")
+                     or session_meta.get("branch_code") or "8301231")
     officer_name  = session_meta.get("officer_name",  "SANDIP BALIRAM LOKHANDE")
     available_pcs = session_meta.get("available_pcs", "1")
     registered_pcs = session_meta.get("registered_pcs", "1")
@@ -57,8 +64,17 @@ def upload_audit(data: AuditData, client_id: str = Query(None)):
     if not data.execution_datetime or data.execution_datetime == "Unknown":
         data.execution_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    audit_row = legacy_db.save_audit(data, client_id=cid)
+    audit_row = legacy_db.save_audit(data, client_id=cid,
+                                     organization_id=origin.get("organization_id"))
     audit_id = audit_row["id"]
+
+    if origin.get("organization_id"):
+        logger.info(f"Audit {audit_id} attributed to organization {origin['organization_id']}")
+    else:
+        logger.warning(
+            f"Audit {audit_id} stored unattributed (client_id={cid}): no launcher "
+            "registration or agent deployment matched. It will not appear under any company."
+        )
 
 
     av_str          = list_text(data.antivirus)

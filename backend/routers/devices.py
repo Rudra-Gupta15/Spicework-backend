@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from backend import legacy_db
+from backend.services.common import is_disk_model, is_identifiable_audit, resolve_machine_model
 
 router = APIRouter()
 
@@ -17,6 +18,11 @@ def list_software_inventory():
 def list_audited_devices():
     devices = {}
     for row in legacy_db.list_audit_index():
+        # Drop records with nothing identifying in them (empty probe/test posts),
+        # which would otherwise render as a phantom "Unknown / Unknown" asset row.
+        if not is_identifiable_audit(row):
+            continue
+
         name = (row['computer_name'] or "Unknown").strip()
         os_name = (row['os_name'] or "Unknown").strip()
 
@@ -49,17 +55,15 @@ def list_audited_devices():
                 elif "Apple" in mfr:
                     mfr = "Apple"
                 mdl_clean = mdl.split('_')[0].strip()
-                # Reject disk/SSD model strings masquerading as laptop model names
-                mdl_lower = mdl_clean.lower()
-                is_disk_model = any(x in mdl_lower for x in [
-                    'gb', 'tb', 'nvme', 'ssd', 'hdd', 'nand', 'sata', 'mzvl', 'kioxia',
-                    'kingston', 'om8pcp', 'om8', 'samsung', 'wd', 'wdc', 'seagate',
-                    'toshiba', 'micron', 'crucial', 'sandisk', 'evmnv', 'pm9', 'pm98',
-                    'hynix', 'sk hynix', 'lexar', 'transcend', 'adata', 'sn5000', 'sn750', 'sn850',
-                    '512', '256', '128', '1tb', '2tb', 'disk', 'drive', 'storage'
-                ])
-                if is_disk_model:
-                    pass  # skip — leave model_name empty, fallback to computer_name
+                # Reject disk/SSD model strings masquerading as laptop model names.
+                # When the reported model is a disk, the motherboard product is
+                # the real machine model on OEM laptops (e.g. GA403UV), so prefer
+                # that over falling all the way back to the computer name.
+                if is_disk_model(mdl_clean):
+                    board = (row.get('mobo_product') or "").strip()
+                    mdl_clean = board if board and not is_disk_model(board) else ""
+                if not mdl_clean:
+                    pass  # leave model_name empty, fallback to computer_name
                 elif mdl_clean.lower().startswith(mfr.lower()):
                     model_name = mdl_clean
                 else:
@@ -67,13 +71,23 @@ def list_audited_devices():
 
             mac = row.get('mac_address')
             uid = mac if mac and mac != "Unknown" else name
+            def _real(value, fallback=""):
+                text = (value or "").strip()
+                return fallback if text.lower() in ("", "unknown", "n/a") else text
+
             devices[key] = {
                 "id": uid,
                 "computer_name": name,
                 "model_name": model_name or name,
                 "os_name": os_name,
                 "username": user,
-                "last_seen": row.get('execution_datetime')
+                "last_seen": row.get('execution_datetime'),
+                # The audit log does track these — the inventory table used to
+                # hardcode them as "Unknown" simply because they were never sent.
+                "serial_number": _real(row.get('serial_number')),
+                "ip_address": _real(row.get('ip_address')),
+                "device_type": _real(row.get('device_type')),
+                "location": _real(row.get('location_info')),
             }
 
     device_list = list(devices.values())
@@ -112,8 +126,20 @@ def get_software_for_device(device_id: str):
         "bitlocker":          latest_data.get("bitlocker") or "Unknown",
         "secure_boot":        latest_data.get("secure_boot") or "Unknown",
         "tpm":                latest_data.get("tpm") or "Unknown",
-        "hardware_details":   {k: latest_data.get(k) for k in
-                                ("cpu", "ram", "disk", "serial_number", "manufacturer", "model")},
+        "hardware_details":   {
+            **{k: latest_data.get(k) for k in
+               ("cpu", "ram", "disk", "serial_number", "manufacturer")},
+            # Audits collected before the agent's $model clobber was fixed stored a
+            # disk product name here; repair it on read so historical rows render.
+            "model": resolve_machine_model(latest_data.get("model"),
+                                           latest_data.get("mobo_product"),
+                                           latest_data.get("computer_name")),
+        },
+        "asset_tag":          latest_data.get("asset_tag") or "",
+        "location_info":      latest_data.get("location_info") or "",
+        "device_type":        latest_data.get("device_type") or "",
+        "life_cycle":         latest_data.get("life_cycle") or "",
+        "domain":             latest_data.get("domain") or "",
         "network_details":    latest_data.get("network_details", []),
         "user_accounts":      latest_data.get("user_accounts", []),
         "login_history":      latest_data.get("raw_login_history") or [],

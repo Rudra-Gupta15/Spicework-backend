@@ -51,11 +51,34 @@ SCRIPT_PATH="$SCRIPT_PATH"
 SERVER_URL="$SERVER_URL"
 HOST_NAME="\$(hostname)"
 
+# Refresh the agent before running it. Without this the watcher would re-run the
+# copy downloaded at install time forever, so any server-side agent fix would
+# require reinstalling on every machine. A failed or bogus download is discarded
+# and the last known-good copy runs instead.
+refresh_agent() {
+    TMP="\${SCRIPT_PATH}.new"
+    if command -v curl >/dev/null 2>&1; then
+        curl -sSL "\${SERVER_URL}/api/sys-agent-mac?client_id=daemon" -o "\$TMP" 2>/dev/null || return
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "\$TMP" "\${SERVER_URL}/api/sys-agent-mac?client_id=daemon" 2>/dev/null || return
+    else
+        return
+    fi
+    # Guard against a truncated download or an HTML error page replacing the agent.
+    if [ -s "\$TMP" ] && grep -q "upload-audit" "\$TMP" 2>/dev/null; then
+        mv -f "\$TMP" "\$SCRIPT_PATH"
+        chmod +x "\$SCRIPT_PATH"
+    else
+        rm -f "\$TMP"
+    fi
+}
+
 CHECK_URL="\${SERVER_URL}/api/check-trigger?device_name=\${HOST_NAME}"
 RESP=\$(curl -s "\$CHECK_URL" 2>/dev/null)
 
 if echo "\$RESP" | grep -q '"trigger":\s*true'; then
     echo "[Infra-Pulse] Immediate Audit Triggered from Portal!"
+    refresh_agent
     bash "\$SCRIPT_PATH" "\$SERVER_URL"
 fi
 EOF

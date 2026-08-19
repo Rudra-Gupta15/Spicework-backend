@@ -74,6 +74,148 @@ def get_deployment_by_client_id(client_id: str):
         return dict(row) if row else None
 
 
+# ── Launcher registrations (the "Before you download" modal) ────────────────
+#
+# agent_deployments cannot serve this flow: it requires a non-null organization_id
+# and requested_by, but the modal is reachable without a signed-in user and the
+# typed company may not match any organization on record. Dropping the entry
+# instead (what happened before) left every audit unattributable, so the raw
+# entry is always kept and the foreign keys are filled in only when they resolve.
+
+_REGISTRATION_COLUMNS = ("client_id, company_name, city_name, site_name, "
+                         "organization_id, site_id, launcher_type, created_at")
+
+
+def _resolve_organization(cur, company_name: str):
+    """Organization whose name matches `company_name` exactly, ignoring case/padding.
+
+    Deliberately strict: a fuzzy match would silently file a machine under the
+    wrong company, which is worse than leaving it unattributed and visible.
+    """
+    if not (company_name or "").strip():
+        return None
+    cur.execute("SELECT id FROM organizations WHERE LOWER(TRIM(name)) = LOWER(TRIM(%s)) LIMIT 1",
+                (company_name,))
+    row = cur.fetchone()
+    return row["id"] if row else None
+
+
+def _resolve_site(cur, organization_id, site_name: str, city_name: str):
+    """
+    Site within the organization, creating it when the name is new.
+
+    Most organizations start with no sites at all, so requiring the site to
+    already exist would make the download dialog a dead end for them. The
+    organization itself is picked from a list and so is never guessed; a site
+    named underneath one is ordinary data entry, and registering it here means
+    the next machine at that office can pick it from the list instead of
+    retyping it. Matching is case-insensitive so "nagpur" reuses "Nagpur"
+    rather than creating a near-duplicate.
+    """
+    if not organization_id:
+        return None
+
+    site_name = (site_name or "").strip()
+    city_name = (city_name or "").strip()
+
+    if site_name:
+        # A named site is the caller's answer: match it, or create it. Falling
+        # back to "some other site in the same city" would quietly file the
+        # machine at an office nobody named — a second office in a city where
+        # one already exists could never be registered.
+        cur.execute(
+            "SELECT id FROM sites WHERE organization_id = %s AND LOWER(TRIM(name)) = LOWER(TRIM(%s)) LIMIT 1",
+            (organization_id, site_name),
+        )
+        row = cur.fetchone()
+        if row:
+            return row["id"]
+
+        cur.execute(
+            "INSERT INTO sites (organization_id, name, city) VALUES (%s, %s, %s) RETURNING id",
+            (organization_id, site_name, city_name or None),
+        )
+        return cur.fetchone()["id"]
+
+    if city_name:
+        # No site named — the city alone is enough to place it if only one
+        # office there is on record.
+        cur.execute(
+            "SELECT id FROM sites WHERE organization_id = %s AND LOWER(TRIM(city)) = LOWER(TRIM(%s)) LIMIT 1",
+            (organization_id, city_name),
+        )
+        row = cur.fetchone()
+        if row:
+            return row["id"]
+
+    return None
+
+
+def save_launcher_registration(client_id: str, company_name: str = "", city_name: str = "",
+                                site_name: str = "", launcher_type: str = "") -> dict:
+    """Record what the downloader typed, resolving it to real ids where possible."""
+    with get_inventory_db() as conn:
+        cur = _dict_cursor(conn)
+        try:
+            organization_id = _resolve_organization(cur, company_name)
+            site_id = _resolve_site(cur, organization_id, site_name, city_name)
+            cur.execute(f"""
+                INSERT INTO launcher_registrations
+                    (client_id, company_name, city_name, site_name, organization_id, site_id, launcher_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (client_id) DO UPDATE SET
+                    company_name    = EXCLUDED.company_name,
+                    city_name       = EXCLUDED.city_name,
+                    site_name       = EXCLUDED.site_name,
+                    organization_id = EXCLUDED.organization_id,
+                    site_id         = EXCLUDED.site_id,
+                    launcher_type   = EXCLUDED.launcher_type
+                RETURNING {_REGISTRATION_COLUMNS}
+            """, (client_id, company_name or None, city_name or None, site_name or None,
+                  organization_id, site_id, launcher_type or None))
+            row = dict(cur.fetchone())
+            conn.commit()
+            return row
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def get_launcher_registration(client_id: str):
+    with get_inventory_db() as conn:
+        cur = _dict_cursor(conn)
+        cur.execute(f"SELECT {_REGISTRATION_COLUMNS} FROM launcher_registrations WHERE client_id = %s",
+                    (client_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def resolve_audit_origin(client_id: str) -> dict:
+    """
+    Where an incoming audit came from, keyed by the client_id baked into its agent.
+
+    Checks the authenticated portal flow (agent_deployments) first, then the
+    download-modal flow (launcher_registrations). Always returns a dict; the ids
+    are None when the origin could not be established.
+    """
+    empty = {"organization_id": None, "site_id": None, "company_name": None,
+             "city_name": None, "site_name": None}
+    if not client_id:
+        return empty
+
+    deployment = get_deployment_by_client_id(client_id)
+    if deployment and deployment.get("organization_id"):
+        return {**empty,
+                "organization_id": deployment["organization_id"],
+                "site_id": deployment.get("site_id")}
+
+    registration = get_launcher_registration(client_id)
+    if registration:
+        return {**empty, **{k: registration.get(k) for k in empty}}
+
+    return empty
+
+
 def mark_deployment_completed(client_id: str):
     with get_inventory_db() as conn:
         cur = _dict_cursor(conn)

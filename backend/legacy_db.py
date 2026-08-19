@@ -10,6 +10,7 @@ peripherals, user accounts, antivirus, compression utilities, network
 details) instead of one row with a giant JSON blob column.
 """
 from backend.auth_db import _dict_cursor, get_inventory_db
+from backend.services.common import is_identifiable_audit
 
 
 # ── Audit Ingestion ──────────────────────────────────────────────────────────
@@ -46,13 +47,15 @@ def save_audit(data, client_id: str = None, organization_id: str = None, pdf_pat
             cols = ["client_id", "organization_id", "current_username", "cpu", "ram", "disk",
                     "serial_number", "manufacturer", "model", "mobo_manufacturer", "mobo_product",
                     "bios_version", "bios_date", "battery_health", "cycle_count", "charge_percent",
+                    "asset_tag", "location_info", "device_type",
                     "raw_login_history", "raw_usb_history", "pdf_path", "xml_path"]
             vals = [client_id, organization_id, data.current_user,
                     hw.get("cpu"), hw.get("ram"), hw.get("disk"),
                     hw.get("serial_number"), hw.get("manufacturer"), hw.get("model"),
                     hw.get("mobo_manufacturer"), hw.get("mobo_product"),
                     hw.get("bios_version"), hw.get("bios_date"),
-                    hw.get("battery_health"), hw.get("cycle_count"), hw.get("charge_percent")]
+                    hw.get("battery_health"), hw.get("cycle_count"), hw.get("charge_percent"),
+                    hw.get("asset_tag"), hw.get("location_info"), hw.get("device_type")]
             import psycopg2.extras
             vals += [psycopg2.extras.Json(data.login_history or []),
                      psycopg2.extras.Json(data.usb_history or []),
@@ -218,9 +221,15 @@ def list_audit_index():
     with get_inventory_db() as conn:
         cur = _dict_cursor(conn)
         cur.execute("""
-            SELECT id, client_id, mac_address, computer_name, os_name, manufacturer, model,
-                   current_username, execution_datetime, created_at
-            FROM legacy_audits ORDER BY created_at DESC
+            SELECT la.id, la.client_id, la.mac_address, la.computer_name, la.os_name,
+                   la.manufacturer, la.model, la.mobo_product, la.serial_number,
+                   la.device_type, la.location_info,
+                   la.current_username, la.execution_datetime, la.created_at,
+                   (SELECT ip_address FROM legacy_audit_network_details
+                    WHERE audit_id = la.id AND ip_address IS NOT NULL
+                      AND ip_address NOT IN ('', 'Unknown', 'N/A')
+                    LIMIT 1) AS ip_address
+            FROM legacy_audits la ORDER BY la.created_at DESC
         """)
         return [dict(r) for r in cur.fetchall()]
 
@@ -233,7 +242,7 @@ def count_devices() -> int:
     browsable rows) — a dual-boot box reporting Windows under one MAC and
     Linux under another is still one machine for a headline device count.
     """
-    audits = list_audit_index()
+    audits = [a for a in list_audit_index() if is_identifiable_audit(a)]
     names = {
         (a.get("computer_name") or a.get("mac_address") or "Unknown").strip().lower()
         for a in audits
@@ -252,7 +261,8 @@ def list_recent_audits(limit: int = 5) -> list:
                    la.execution_datetime, la.created_at, la.current_username,
                    la.firewall, la.license_status,
                    (SELECT ip_address FROM legacy_audit_network_details
-                    WHERE audit_id = la.id AND ip_address IS NOT NULL AND ip_address <> ''
+                    WHERE audit_id = la.id AND ip_address IS NOT NULL
+                      AND ip_address NOT IN ('', 'Unknown', 'N/A')
                     LIMIT 1) AS ip_address,
                    (SELECT COUNT(*) FROM legacy_audit_software WHERE audit_id = la.id) AS software_count,
                    (SELECT STRING_AGG(name, ', ') FROM legacy_audit_antivirus

@@ -293,6 +293,65 @@ PYEOF
     fi
 fi
 
+# ---------------------------------------------------------
+# Asset tag & chassis type
+#
+# Mirrors the Windows agent: prefer a tag actually burned into firmware, then
+# fall back to real hardware serials. Nothing is synthesised -- a made-up tag is
+# indistinguishable from a real one once it reaches a compliance report.
+# ---------------------------------------------------------
+_is_placeholder() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/^ *//;s/ *$//')" in
+        ""|"unknown"|"n/a"|"none"|"null"|"not specified"|"default string") return 0 ;;
+        "system serial number"|"to be filled by o.e.m.") return 0 ;;
+        *"no asset"*|*"fill by oem"*|*"to be filled"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+ASSET_TAG="Unknown"
+if [ "$OS_NAME" = "macOS" ]; then
+    # Macs expose no SMBIOS asset tag; the platform serial is the canonical ID.
+    for _cand in "$SERIAL_NUMBER" "$MOBO_SERIAL"; do
+        if ! _is_placeholder "$_cand"; then ASSET_TAG="$_cand"; break; fi
+    done
+else
+    _CHASSIS_TAG=""
+    [ -r /sys/class/dmi/id/chassis_asset_tag ] && _CHASSIS_TAG=$(cat /sys/class/dmi/id/chassis_asset_tag 2>/dev/null | tr -d '\0\r\n')
+    if _is_placeholder "$_CHASSIS_TAG" && command -v dmidecode >/dev/null 2>&1; then
+        _CHASSIS_TAG=$(dmidecode -s chassis-asset-tag 2>/dev/null | head -1)
+    fi
+    for _cand in "$_CHASSIS_TAG" "$MOBO_SERIAL" "$SERIAL_NUMBER"; do
+        if ! _is_placeholder "$_cand"; then ASSET_TAG="$_cand"; break; fi
+    done
+fi
+
+# Chassis type: read it rather than assuming every machine is a laptop.
+DEVICE_TYPE="Unknown"
+if [ "$OS_NAME" = "macOS" ]; then
+    case "$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')" in
+        *macbook*) DEVICE_TYPE="Laptop" ;;
+        *imac*|*"mac mini"*|*"mac studio"*|*"mac pro"*) DEVICE_TYPE="Desktop" ;;
+        *xserve*) DEVICE_TYPE="Server" ;;
+    esac
+    if [ "$DEVICE_TYPE" = "Unknown" ]; then
+        if pmset -g batt 2>/dev/null | grep -qi "InternalBattery"; then DEVICE_TYPE="Laptop"; else DEVICE_TYPE="Desktop"; fi
+    fi
+else
+    _CT=""
+    [ -r /sys/class/dmi/id/chassis_type ] && _CT=$(cat /sys/class/dmi/id/chassis_type 2>/dev/null | tr -d '\0\r\n')
+    case "$_CT" in
+        3|4|5|6|7|13|15|16|24) DEVICE_TYPE="Desktop" ;;
+        8|9|10|11|12|14|31|32) DEVICE_TYPE="Laptop" ;;
+        17|23|25|28) DEVICE_TYPE="Server" ;;
+        30) DEVICE_TYPE="Tablet" ;;
+    esac
+    if [ "$DEVICE_TYPE" = "Unknown" ]; then
+        if ls /sys/class/power_supply/BAT* >/dev/null 2>&1; then DEVICE_TYPE="Laptop"; else DEVICE_TYPE="Desktop"; fi
+    fi
+fi
+
+ASSET_TAG=$(echo "$ASSET_TAG" | sed 's/"/\\"/g')
 SERIAL_NUMBER=$(echo "$SERIAL_NUMBER" | sed 's/"/\\"/g')
 MANUFACTURER=$(echo "$MANUFACTURER"  | sed 's/"/\\"/g')
 MODEL_NAME=$(echo "$MODEL_NAME"      | sed 's/"/\\"/g')
@@ -1245,8 +1304,8 @@ hw = {
     "shutdown_time":    safe("""$SHUTDOWN_TIME"""),
     "last_backup":      safe("""$LAST_BACKUP"""),
     "life_cycle":       safe("""$LIFE_CYCLE"""),
-    "asset_tag":        "N/A",
-    "device_type":      "Laptop",
+    "asset_tag":        safe("""$ASSET_TAG"""),
+    "device_type":      safe("""$DEVICE_TYPE"""),
     "architecture":     safe("""$ARCHITECTURE"""),
     "processor_name":   safe("""$CPU"""),
     "cpu_cores":        safe("""$CPU_CORES"""),

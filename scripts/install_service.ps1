@@ -47,10 +47,44 @@ try {
 }
 
 # Register Windows Scheduled Task (Every 2 Hours = 120 Minutes)
+# Write the runner that the scheduled task actually invokes.
+#
+# The task must NOT point straight at audit.ps1: that pins every machine to the
+# agent version present at install time, so a server-side agent fix would need a
+# manual reinstall on every endpoint. The runner re-fetches the agent first and
+# only swaps it in when the download looks like a real script, so an unreachable
+# server simply means the last known-good copy runs again.
+$RunnerPath = Join-Path $InstallDir "runner.ps1"
+$RunnerBody = @'
+$InstallDir = Join-Path $env:LOCALAPPDATA "InfraPulse"
+$ScriptPath = Join-Path $InstallDir "audit.ps1"
+$ServerUrl  = "__SERVER_URL__"
+
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $Tmp = "$ScriptPath.new"
+    $wc = New-Object System.Net.WebClient
+    $wc.Headers.Add("User-Agent", "PowerShell WinHTTP CLI")
+    $wc.DownloadFile("$ServerUrl/api/sys-agent?client_id=sys_daemon", $Tmp)
+    # Guard against a truncated download or an HTML error page replacing the agent.
+    if ((Get-Item $Tmp).Length -gt 10000 -and (Select-String -Path $Tmp -Pattern "upload-audit" -Quiet)) {
+        Move-Item -Force $Tmp $ScriptPath
+    } else {
+        Remove-Item $Tmp -Force -ErrorAction SilentlyContinue
+    }
+} catch {}
+
+if (Test-Path $ScriptPath) {
+    & powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File $ScriptPath
+}
+'@
+$RunnerBody = $RunnerBody.Replace("__SERVER_URL__", $ServerUrl)
+Set-Content -Path $RunnerPath -Value $RunnerBody -Encoding UTF8
+
 Write-Host "[3/4] Registering 2-Hour Auto-Audit Scheduled Task..." -ForegroundColor Yellow
 
 $TaskName = "InfraPulseAuditDaemon"
-$Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`" -ServerUrl `"$ServerUrl`""
+$Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$RunnerPath`""
 $Trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 120)
 
 try {
@@ -60,7 +94,7 @@ try {
     Write-Host "[+] Scheduled Task '$TaskName' registered successfully (Repeats every 2 hours)." -ForegroundColor Green
 } catch {
     # Fallback to schtasks.exe if PowerShell cmdlets fail
-    $SchCmd = "schtasks /create /tn `"$TaskName`" /tr `"powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File `\`"$ScriptPath`\`" -ServerUrl `\`"$ServerUrl`\`"`" /sc minute /mo 120 /f"
+    $SchCmd = "schtasks /create /tn `"$TaskName`" /tr `"powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File `\`"$RunnerPath`\`"`" /sc minute /mo 120 /f"
     Invoke-Expression $SchCmd | Out-Null
     Write-Host "[+] Scheduled Task '$TaskName' registered via schtasks (Repeats every 2 hours)." -ForegroundColor Green
 }

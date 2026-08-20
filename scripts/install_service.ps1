@@ -12,7 +12,7 @@ Write-Host "  Infra-Pulse Continuous Auto-Audit Installer (Windows)" -Foreground
 Write-Host "--------------------------------------------------------" -ForegroundColor Cyan
 
 # Install Directory
-$InstallDir = Join-Path $env:LOCALAPPDATA "InfraPulse"
+$InstallDir = Join-Path $env:LOCALAPPDATA "Spicework"
 if (!(Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 }
@@ -56,7 +56,7 @@ try {
 # server simply means the last known-good copy runs again.
 $RunnerPath = Join-Path $InstallDir "runner.ps1"
 $RunnerBody = @'
-$InstallDir    = Join-Path $env:LOCALAPPDATA "InfraPulse"
+$InstallDir    = Join-Path $env:LOCALAPPDATA "Spicework"
 $ScriptPath    = Join-Path $InstallDir "audit.ps1"
 $StampPath     = Join-Path $InstallDir "last_run.txt"
 $ServerUrl     = "__SERVER_URL__"
@@ -115,7 +115,7 @@ Set-Content -Path $RunnerPath -Value $RunnerBody -Encoding UTF8
 
 Write-Host "[3/4] Registering 2-Hour Auto-Audit Scheduled Task..." -ForegroundColor Yellow
 
-$TaskName = "InfraPulseAuditDaemon"
+$TaskName = "SpiceworkAuditDaemon"
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$RunnerPath`""
 # Fires every 2 minutes; the runner decides whether a scan is actually due.
 # The cadence is the poll for portal-requested rescans, not the scan interval

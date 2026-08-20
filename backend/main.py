@@ -1,13 +1,15 @@
-#         INFRAPULSE WORKSTATION COMPLIANCE AUDIT BACKEND (FASTAPI)
+#          SPICEWORK WORKSTATION COMPLIANCE AUDIT BACKEND (FASTAPI)
 # Version: 3.0.0 — Full IT Asset Management Edition
 
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.core.config import FRONTEND_DIR
+from backend.core.security import bearer_token, decode_access_token, is_public_path
 from backend.routers import (
     assets,
     audits,
@@ -26,7 +28,46 @@ from backend.routers import (
     wifi,
 )
 
-app = FastAPI(title="InfraPulse IT Asset Management Portal", version="3.0.0")
+app = FastAPI(title="Spicework IT Asset Management Portal", version="3.0.0")
+
+
+@app.middleware("http")
+async def require_authentication(request: Request, call_next):
+    """
+    Gate on the way in: every /api/ route needs a valid bearer token unless it
+    is on the public allowlist in core.security (auth itself, plus the agent
+    and audit-ingestion endpoints the unattended collectors call).
+
+    Enforcing it here rather than per-router means a newly added endpoint is
+    protected the moment it exists — the failure mode is a locked door, not an
+    open one. Registered before the CORS middleware below so CORS stays
+    outermost: a 401 from here still carries the headers the browser needs to
+    read it as a 401 instead of a generic network error.
+    """
+    if request.method == "OPTIONS" or is_public_path(request.url.path):
+        return await call_next(request)
+
+    token = bearer_token(request)
+    if not token:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Not authenticated."},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        # Claims are stashed for the request so handlers can read them through
+        # the get_current_user dependency without decoding a second time.
+        request.state.user = decode_access_token(token)
+    except HTTPException as e:
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"detail": e.detail},
+            headers=e.headers or {},
+        )
+
+    return await call_next(request)
+
 
 cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
 if cors_origins_env:

@@ -86,11 +86,17 @@ def get_org_dashboard_stats() -> dict:
         return {"sites": sites, "users": users, "cities": cities}
 
 
-_USER_COLUMNS = """
-    id, email, first_name, last_name, user_type,
-    is_active, email_verified, last_login_at,
-    organization_id, site_id, created_at, updated_at
-"""
+_USER_COLUMN_NAMES = (
+    "id", "email", "first_name", "last_name", "user_type",
+    "is_active", "email_verified", "last_login_at",
+    "organization_id", "site_id", "created_at", "updated_at",
+)
+
+_USER_COLUMNS = ", ".join(_USER_COLUMN_NAMES)
+
+# `organizations` shares is_active / created_at / updated_at with `users`, so
+# any query joining the two has to say which table it means.
+_USER_COLUMNS_Q = ", ".join(f"u.{c}" for c in _USER_COLUMN_NAMES)
 
 
 def list_users() -> list:
@@ -136,8 +142,10 @@ def authenticate_user(email: str, password: str):
     with get_inventory_db() as conn:
         cur = _dict_cursor(conn)
         cur.execute(f"""
-            SELECT {_USER_COLUMNS}, password_hash
-            FROM users WHERE email = %s
+            SELECT {_USER_COLUMNS_Q}, u.password_hash, o.name AS organization_name
+            FROM users u
+            LEFT JOIN organizations o ON o.id = u.organization_id
+            WHERE u.email = %s
         """, (email,))
         row = cur.fetchone()
         if not row:
@@ -264,6 +272,49 @@ def create_organization(
             raise
 
         return {"organization": org, "admin_user": admin_user}
+
+
+def register_account(
+    organization_name: str,
+    email: str,
+    password: str,
+    first_name: str,
+    last_name: str = None,
+) -> dict:
+    """
+    Self-service signup. A new signup has no organization to join yet, so this
+    creates one and makes the signer-up its Organization Admin — reusing
+    create_organization so both rows land in a single transaction.
+
+    Returns the user in the same shape authenticate_user does (roles attached,
+    never password_hash), so the caller can issue a token without a second
+    round-trip to the database.
+    """
+    result = create_organization(
+        name=organization_name,
+        admin_email=email,
+        admin_password=password,
+        admin_first_name=first_name,
+        admin_last_name=last_name,
+    )
+    user = dict(result["admin_user"])
+    user["roles"] = ["ORGANIZATION_ADMIN"]
+    user["organization_name"] = result["organization"]["name"]
+    return user
+
+
+def touch_last_login(user_id: str) -> None:
+    """Stamp last_login_at. Best-effort — a failure here must not fail the login."""
+    try:
+        with get_inventory_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (user_id,),
+            )
+            conn.commit()
+    except Exception:
+        pass
 
 
 def list_organizations() -> list:

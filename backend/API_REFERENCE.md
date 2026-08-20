@@ -1,4 +1,4 @@
-# API Reference — InfraPulse Backend
+# API Reference — Spicework Backend
 
 For frontend developers connecting to the FastAPI backend ([backend/main.py](main.py)).
 
@@ -6,7 +6,7 @@ For frontend developers connecting to the FastAPI backend ([backend/main.py](mai
 
 - **Base URL:** `http://<host>:8000` (uvicorn default; no global `/api` prefix — some routes have `/api/...`, many legacy ones don't).
 - **CORS:** open (`allow_origins=["*"]`) unless the server sets `CORS_ALLOWED_ORIGINS` (comma-separated list) in `.env`, in which case only those origins are allowed and credentials are enabled.
-- **Auth:** no JWT/session tokens anywhere. `POST /api/auth/login` just verifies email+password against Postgres and returns the user object — the frontend is responsible for storing/passing `user_id`/`organization_id` on subsequent calls itself. There is no `Authorization` header check on any endpoint.
+- **Auth:** JWT bearer tokens. `POST /api/auth/login` and `POST /api/auth/register` verify against the `users` table in Postgres (bcrypt) and return `{ access_token, token_type, expires_in, user }`. **Every `/api/...` endpoint requires `Authorization: Bearer <access_token>`** except the public allowlist in [core/security.py](core/security.py) — the two auth endpoints, plus the agent/collector endpoints that unattended scripts call with no user session (`/api/upload-audit`, `/api/check-status`, `/api/server-info`, `/api/sys-agent*`, `/api/sys-win`, `/api/get-audit-script`, `/api/install-daemon`, `/api/download-*-launcher`). Paths that do **not** start with `/api/` are public — that covers the SPA's static files and the agent scripts the collectors fetch by plain URL. Enforcement is a single middleware in [main.py](main.py), so a newly added endpoint is protected by default. Tokens are signed with `JWT_SECRET` and expire after `JWT_EXPIRE_MINUTES` (default 720); they are stateless, so there is no server-side revoke — rotate `JWT_SECRET` to invalidate everything outstanding.
 - **Static frontend:** the built frontend (`FRONTEND_DIR`) is mounted at `/` as a catch-all SPA host — it's registered *last*, so it never shadows the API routes above.
 - **IDs:** the inventory/org/device/wifi APIs (Postgres-backed) use UUID strings. The legacy audit APIs (SQLite-backed) key off `mac_address` or `computer_name` strings instead.
 
@@ -18,7 +18,9 @@ For frontend developers connecting to the FastAPI backend ([backend/main.py](mai
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| POST | `/api/auth/login` | `{ email, password }` | User object + `roles: string[]`. `401` if invalid/inactive. |
+| POST | `/api/auth/login` | `{ email, password }` | `{ access_token, token_type, expires_in, user }`. `user` carries `roles: string[]` and `organization_name`. `401` if the credentials don't match or the account is inactive — deliberately the same message either way, so the endpoint can't be used to enumerate registered addresses. |
+| POST | `/api/auth/register` | `{ organization_name, email, password, first_name, last_name? }` | `201` with the same shape as login — signing up logs you straight in. Creates the organization **and** its first user (`TENANT_USER`, role `ORGANIZATION_ADMIN`) in one transaction. `400` on a malformed field or a password under 6 characters, `409` if the email is taken. |
+| GET | `/api/auth/me` | — | The bearer token's account, read fresh from Postgres so a deactivated user stops resolving immediately rather than when the token expires. `401` if the token is missing/invalid/expired or the account is inactive. |
 
 ## 2. Inventory reads (Postgres) — [inventory.py](routers/inventory.py)
 

@@ -9,7 +9,7 @@ set -e
 SERVER_URL="${1:-http://192.168.1.52:8000}"
 SERVER_URL="${SERVER_URL%/}"
 
-INSTALL_DIR="$HOME/.infrapulse"
+INSTALL_DIR="$HOME/.spicework"
 SCRIPT_PATH="$INSTALL_DIR/audit.sh"
 
 echo "--------------------------------------------------------"
@@ -85,10 +85,10 @@ EOF
 chmod +x "$WATCHER_PATH"
 
 if [ "$OS_TYPE" = "Darwin" ]; then
-    # macOS LaunchAgent (~/Library/LaunchAgents/com.infrapulse.audit.plist)
+    # macOS LaunchAgent (~/Library/LaunchAgents/com.spicework.audit.plist)
     LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
     mkdir -p "$LAUNCH_AGENTS_DIR"
-    PLIST_PATH="$LAUNCH_AGENTS_DIR/com.infrapulse.audit.plist"
+    PLIST_PATH="$LAUNCH_AGENTS_DIR/com.spicework.audit.plist"
 
     cat <<EOF > "$PLIST_PATH"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -96,7 +96,7 @@ if [ "$OS_TYPE" = "Darwin" ]; then
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.infrapulse.audit</string>
+    <string>com.spicework.audit</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>

@@ -1,4 +1,4 @@
-# InfraPulse
+# Spicework
 
 **IT Asset Management & Workstation Compliance Audit Platform**  
 *Engineered by Prevoyance IT Solutions* — Version 3.0.0
@@ -69,7 +69,7 @@ that do not exist yet fails immediately.
 
 ## 1. About the project
 
-InfraPulse collects hardware, software, network and user inventory from Windows, macOS and Linux workstations across branch offices, and turns each collection into a **regulatory compliance report** — a formatted PDF and a schema-conformant XML.
+Spicework collects hardware, software, network and user inventory from Windows, macOS and Linux workstations across branch offices, and turns each collection into a **regulatory compliance report** — a formatted PDF and a schema-conformant XML.
 
 It is built around a single deliverable: **a prescribed audit document**. That distinguishes it from general device-management platforms, which produce live dashboards rather than documents.
 
@@ -368,7 +368,7 @@ How each platform is actually queried. **No kernel drivers, no privileged hooks*
 
 ## 6. Endpoint agent design
 
-InfraPulse supports **two deployment modes** from the same collector code.
+Spicework supports **two deployment modes** from the same collector code.
 
 ### Mode 1 — One-shot
 
@@ -522,7 +522,7 @@ Without it, every PC in a branch uploads at the same second after a power restor
 | Document | Contents |
 |---|---|
 | `CODEBASE_EXPLANATION.md` | Line-by-line walkthrough of the backend, both collectors, and the verification design |
-| `tools-comp.md` | InfraPulse vs osquery + Fleet — cost, security, scale, maintenance |
+| `tools-comp.md` | Spicework vs osquery + Fleet — cost, security, scale, maintenance |
 | `data-fields-comparison.md` | All 67 required fields mapped to the osquery schema; hybrid migration plan |
 | `WORKFLOW.md` | Operational workflow |
 | `README.md` | Setup, running, and architecture specification document |

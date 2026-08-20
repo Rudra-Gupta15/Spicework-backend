@@ -19,7 +19,7 @@ def draw_page_decorations(canvas, doc):
     canvas.rect(36, 36, doc.pagesize[0] - 72, doc.pagesize[1] - 72)
     canvas.setFont("Helvetica-Bold", 8)
     canvas.setFillColor(colors.HexColor("#A80000"))
-    canvas.drawCentredString(doc.pagesize[0] / 2.0, 20, "INSPECTION REPORT BY INFRAPULSE IT MANAGEMENT")
+    canvas.drawCentredString(doc.pagesize[0] / 2.0, 20, "INSPECTION REPORT BY SPICEWORK IT MANAGEMENT")
     canvas.restoreState()
 
 

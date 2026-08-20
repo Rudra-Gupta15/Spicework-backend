@@ -45,8 +45,31 @@ class LoginRequest(BaseModel):
 
 
 class LoginResponse(User):
-    """A logged-in user plus their assigned role names."""
+    """A logged-in user, their assigned role names, and the tenant they belong
+    to — enough for the client to paint its header without a second call."""
     roles: List[str] = []
+    organization_name: Optional[str] = None
+
+
+class RegisterRequest(BaseModel):
+    """
+    Self-service signup. A new signer-up has no organization to join, so they
+    name one and become its Organization Admin.
+    """
+    organization_name: str
+    email: str
+    password: str
+    first_name: str
+    last_name: Optional[str] = None
+
+
+class AuthResponse(BaseModel):
+    """What login and register both hand back: the user, and the token to send
+    with every subsequent request as `Authorization: Bearer <access_token>`."""
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds until the token stops being accepted
+    user: LoginResponse
 
 
 class PlatformUserRole(BaseModel):

@@ -1,5 +1,5 @@
 # ==============================================================================
-#         INFRAPULSE WORKSTATION SYSTEM INFRASTRUCTURE SCRIPT (WINDOWS)
+#          SPICEWORK WORKSTATION SYSTEM INFRASTRUCTURE SCRIPT (WINDOWS)
 # ==============================================================================
 
 $ErrorActionPreference = "SilentlyContinue"

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-#        INFRAPULSE WORKSTATION SYSTEM INFRASTRUCTURE SCRIPT (macOS / Linux)
+#         SPICEWORK WORKSTATION SYSTEM INFRASTRUCTURE SCRIPT (macOS / Linux)
 # ==============================================================================
 # Version: 3.0.0 — Full IT Asset Management Edition
 

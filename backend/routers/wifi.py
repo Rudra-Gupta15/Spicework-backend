@@ -333,7 +333,7 @@ $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNoti
 $notifier.Show($toast)
 
 Write-Host "==============================================" -ForegroundColor Cyan
-Write-Host "    INFRAPULSE IT COMPLIANCE & SECURITY AUDIT   " -ForegroundColor Cyan
+Write-Host "    SPICEWORK IT COMPLIANCE & SECURITY AUDIT    " -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "A mandatory IT security audit has been initiated."

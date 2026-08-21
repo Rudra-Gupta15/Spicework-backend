@@ -216,6 +216,45 @@ def get_last_two_audits(identifier: str):
     return audits
 
 
+def list_device_scans(identifier: str, limit: int = 50) -> dict:
+    """
+    Every audit filed for one machine, newest first — the scan history behind a
+    single device row.
+
+    Ordered by created_at (a real timestamptz) rather than execution_datetime,
+    which is stored as text and is set by the collector's own clock: a
+    workstation with a skewed clock would otherwise scatter its scans through
+    the list. execution_datetime is still returned, since it is what the
+    machine believed the time was.
+
+    A long-lived device accumulates hundreds of these, so the count is reported
+    separately from the capped page of rows.
+    """
+    with get_inventory_db() as conn:
+        cur = _dict_cursor(conn)
+        cur.execute("""
+            SELECT COUNT(*) AS total FROM legacy_audits
+            WHERE LOWER(computer_name) = LOWER(%s) OR LOWER(mac_address) = LOWER(%s)
+        """, (identifier, identifier))
+        total = cur.fetchone()["total"]
+
+        cur.execute("""
+            SELECT la.id, la.computer_name, la.mac_address, la.os_name, la.os_version,
+                   la.current_username, la.serial_number, la.execution_datetime,
+                   la.created_at,
+                   (SELECT ip_address FROM legacy_audit_network_details
+                    WHERE audit_id = la.id AND ip_address IS NOT NULL
+                      AND ip_address NOT IN ('', 'Unknown', 'N/A')
+                    LIMIT 1) AS ip_address
+            FROM legacy_audits la
+            WHERE LOWER(la.computer_name) = LOWER(%s) OR LOWER(la.mac_address) = LOWER(%s)
+            ORDER BY la.created_at DESC
+            LIMIT %s
+        """, (identifier, identifier, limit))
+
+        return {"total": total, "scans": [dict(r) for r in cur.fetchall()]}
+
+
 def list_audit_index():
     """One row per audit with fields devices.py needs for its dedupe/list logic."""
     with get_inventory_db() as conn:
@@ -498,7 +537,9 @@ def get_audit_report_paths(client_id: str):
 
 _ASSET_METADATA_COLUMNS = [
     "device_id", "asset_tag", "owner", "department", "location", "purchase_date",
-    "purchase_price", "warranty_expiry", "life_cycle_stage", "vendor", "notes", "last_updated",
+    "purchase_price", "warranty_expiry", "life_cycle_stage", "vendor", "notes",
+    "cpu_override", "ram_override", "disk_override", "serial_number_override",
+    "manufacturer_override", "device_model_override", "last_updated",
 ]
 
 
@@ -685,8 +726,16 @@ def delete_ticket(ticket_id: str) -> bool:
 # on its next poll. Kept in the database rather than in memory because the
 # previous in-process set lost every pending trigger on restart, and could not
 # be seen by a second uvicorn worker.
-
-_TRIGGER_TTL_MINUTES = 30
+#
+# An earlier revision expired an unclaimed flag after 30 minutes, on the
+# theory that a machine offline for a week should not surprise-scan the
+# moment it reappears. In practice most machines here sit offline far longer
+# than 30 minutes between check-ins, so almost every request expired before
+# the agent ever got a chance to poll for it — confirmed against this
+# estate's own scan_triggers rows, all four pending requests dead on arrival.
+# A flag now waits indefinitely; clicking Rescan again before it is claimed
+# simply refreshes `requested_at` via the upsert below rather than stacking a
+# second row.
 
 
 def request_scan(device_id: str, computer_name: str = None, requested_by: str = None) -> dict:
@@ -723,9 +772,8 @@ def claim_scan_trigger(device_name: str) -> bool:
     True when this machine has an undelivered scan request, claiming it so the
     next poll does not scan again.
 
-    Requests older than the TTL are ignored: a machine that was offline for a
-    week should not launch a scan the moment it reappears, long after whoever
-    asked has stopped watching for the result.
+    No expiry: a request waits until the device actually checks in, however
+    long that takes, rather than dying unseen while it is offline.
     """
     key = (device_name or "").strip().lower()
     if not key:
@@ -738,9 +786,8 @@ def claim_scan_trigger(device_name: str) -> bool:
                SET delivered_at = CURRENT_TIMESTAMP
              WHERE device_key = %s
                AND delivered_at IS NULL
-               AND requested_at > CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
             RETURNING device_key
-        """, (key, _TRIGGER_TTL_MINUTES))
+        """, (key,))
         claimed = cur.fetchone() is not None
         conn.commit()
         return claimed

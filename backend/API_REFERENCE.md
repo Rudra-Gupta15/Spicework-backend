@@ -22,6 +22,26 @@ For frontend developers connecting to the FastAPI backend ([backend/main.py](mai
 | POST | `/api/auth/register` | `{ organization_name, email, password, first_name, last_name? }` | `201` with the same shape as login — signing up logs you straight in. Creates the organization **and** its first user (`TENANT_USER`, role `ORGANIZATION_ADMIN`) in one transaction. `400` on a malformed field or a password under 6 characters, `409` if the email is taken. |
 | GET | `/api/auth/me` | — | The bearer token's account, read fresh from Postgres so a deactivated user stops resolving immediately rather than when the token expires. `401` if the token is missing/invalid/expired or the account is inactive. |
 
+## 1b. Registered Devices — [registered_devices.py](routers/registered_devices.py)
+
+The device estate behind `/inventory/device`: units the organization bought and hands out (Laptop / Printer / Projector / Desktop), plus the trail of who has held each one. Schema in [migrations/001_registered_devices.sql](../migrations/001_registered_devices.sql).
+
+**Distinct from `hardware_devices` / `device_inventory_current`**, which are machines an agent audited. A unit here exists because someone typed it in; it may never run an agent.
+
+Every route is scoped to the caller's organization, taken from their **token** — there is no organization id in the path, so a valid login cannot be pointed at another tenant's estate. A user with no organization gets `403`.
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/api/registered-devices` | — | `{ devices: [...] }`, newest first. Optional `?category=Laptop\|Printer\|Projector\|Desktop`. `current_user_name` is derived from whichever assignment is still open, so it can never disagree with the history; `""` means the unit is in the store. |
+| POST | `/api/registered-devices` | `{ category, name, serial_number, buy_date?, current_user?, site_id? }` | `201` with the saved device. Naming `current_user` opens their assignment in the same transaction. `409` if the serial is already registered **in that organization** — two tenants may hold the same manufacturer serial. `422` on an unknown category. |
+| GET | `/api/registered-devices/{id}` | — | One device. `404` if it isn't the caller's. |
+| GET | `/api/registered-devices/{id}/assignments` | — | `{ assignments: [...] }`, newest spell first. `returned_on: null` marks the current holder. Empty list = never issued; `404` = no such device. |
+| POST | `/api/registered-devices/{id}/assignments` | `{ user_name, assigned_on?, note? }` | Hands the unit over, closing any open spell on the same date so the trail stays a continuous chain. Returns the full history. |
+| POST | `/api/registered-devices/{id}/return` | `{ returned_on?, note? }` | Takes the unit back into the store. Returns the full history. |
+| DELETE | `/api/registered-devices/{id}` | — | `204`. Assignments cascade. |
+
+A partial unique index (`device_assignments_one_open_per_device`) enforces at most one open assignment per unit, so a concurrent double-assign fails in the database rather than silently producing two holders.
+
 ## 2. Inventory reads (Postgres) — [inventory.py](routers/inventory.py)
 
 Read-only views into the `sw inventory` Postgres DB.
@@ -90,6 +110,7 @@ Read-only views into the `sw inventory` Postgres DB.
 | GET | `/devices` or `/api/devices` | `{ devices: [], total }` — deduplicated list of audited machines (by name+OS family), with best-effort model name cleanup |
 | GET | `/api/software/{device_id}` | Full latest-audit snapshot for one device (software, hardware, network, users, hotfixes, etc.), matched by mac or computer name |
 | GET | `/api/device-diff/{device_id}` | Diffs the two most recent scans for a device: newly installed/removed software + hardware/OS field changes |
+| GET | `/api/devices/{identifier}/scans` | `?limit=` (default 50, max 200). Every audit one machine has filed, newest first — the scan trail behind a single device row. `identifier` is the computer name or MAC. Ordered by `created_at` (a real timestamptz) rather than `execution_datetime`, which is collector-clock text and would scatter the list for a machine with a skewed clock. `total` is the full count even when the page is capped. `404` if the machine has never reported. |
 
 ## 8. Asset Metadata (flat JSON files) — [assets.py](routers/assets.py)
 

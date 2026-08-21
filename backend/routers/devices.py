@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from backend import legacy_db
-from backend.services.common import is_disk_model, is_identifiable_audit, resolve_machine_model
+from backend.services.common import execution_day, is_disk_model, is_identifiable_audit, resolve_machine_model
 
 router = APIRouter()
 
@@ -16,7 +16,18 @@ def list_software_inventory():
 @router.get("/devices")
 @router.get("/api/devices")
 def list_audited_devices():
+    # Keyed by the same id (mac, or computer name) the list below assigns as
+    # "id" — one query up front rather than one per device, since the table
+    # is small and every device is about to be looped over anyway.
+    overrides_by_id = {row["device_id"]: row for row in legacy_db.list_asset_metadata()}
     devices = {}
+    # Every day each device was ever audited, not just the day of its most
+    # recent one. `list_audit_index()` returns one row per audit across all of
+    # history, newest first, and the loop below only keeps the first (i.e.
+    # latest) row per device for the fields that make sense as a single
+    # snapshot — this collects the rest so a machine rescanned since a given
+    # day does not erase that it was ever scanned on it.
+    scan_days: dict = {}
     for row in legacy_db.list_audit_index():
         # Drop records with nothing identifying in them (empty probe/test posts),
         # which would otherwise render as a phantom "Unknown / Unknown" asset row.
@@ -38,11 +49,30 @@ def list_audited_devices():
             os_family = os_lower
 
         key = (name.lower(), os_family)
+
+        day = execution_day(row.get('execution_datetime'))
+        if day:
+            scan_days.setdefault(key, set()).add(day)
+
         if key not in devices:
             user = row.get('current_username') or "Unknown"
+
+            # Computed early (normally built after the manufacturer/model
+            # block below) because a correction, if one exists, has to reach
+            # that block before it runs rather than patch its output — the
+            # model-name logic needs the corrected manufacturer to decide
+            # things like whether the model string already starts with it.
+            mac = row.get('mac_address')
+            uid = mac if mac and mac != "Unknown" else name
+            overrides = overrides_by_id.get(uid) or {}
+
+            def _corrected(raw_value, column):
+                override = (overrides.get(column) or "").strip()
+                return override or raw_value
+
             model_name = ""
-            mfr = (row.get('manufacturer') or "").strip()
-            mdl = (row.get('model') or "").strip()
+            mfr = _corrected((row.get('manufacturer') or "").strip(), "manufacturer_override")
+            mdl = _corrected((row.get('model') or "").strip(), "device_model_override")
             if mfr and mdl and mdl != "Unknown" and mdl != "N/A":
                 if "ASUSTeK" in mfr or "ASUS" in mfr:
                     mfr = "ASUS"
@@ -69,8 +99,6 @@ def list_audited_devices():
                 else:
                     model_name = f"{mfr} {mdl_clean}".strip()
 
-            mac = row.get('mac_address')
-            uid = mac if mac and mac != "Unknown" else name
             def _real(value, fallback=""):
                 text = (value or "").strip()
                 return fallback if text.lower() in ("", "unknown", "n/a") else text
@@ -84,15 +112,81 @@ def list_audited_devices():
                 "last_seen": row.get('execution_datetime'),
                 # The audit log does track these — the inventory table used to
                 # hardcode them as "Unknown" simply because they were never sent.
-                "serial_number": _real(row.get('serial_number')),
+                "serial_number": _real(_corrected(row.get('serial_number'), "serial_number_override")),
                 "ip_address": _real(row.get('ip_address')),
                 "device_type": _real(row.get('device_type')),
                 "location": _real(row.get('location_info')),
             }
 
+    for key, device in devices.items():
+        device["scan_days"] = sorted(scan_days.get(key, ()), reverse=True)
+
     device_list = list(devices.values())
     device_list.sort(key=lambda x: x.get("last_seen") or "", reverse=True)
     return {"devices": device_list, "total": len(device_list)}
+
+
+@router.get("/api/devices/{identifier}/scans")
+def list_device_scan_history(identifier: str, limit: int = 50):
+    """
+    When this particular machine was scanned — one entry per audit it has
+    filed, newest first.
+
+    The device list collapses a machine's audits into one row per (name, OS
+    family), so a dual-booted box shows twice and every earlier scan is hidden
+    behind whichever was latest. This is the trail behind that row.
+
+    `identifier` is the computer name or MAC address. `total` is the full count
+    even when the returned page is capped — a machine that has reported for
+    months has hundreds.
+    """
+    limit = max(1, min(limit, 200))
+    result = legacy_db.list_device_scans(identifier, limit)
+
+    if result["total"] == 0:
+        raise HTTPException(status_code=404, detail=f"No scans recorded for '{identifier}'.")
+
+    return {
+        "device": identifier,
+        "total": result["total"],
+        "returned": len(result["scans"]),
+        "scans": result["scans"],
+    }
+
+
+# A field left blank here means "nothing to correct" — the scanned value
+# stands. Maps a Hardware Specification field to the asset_metadata column
+# holding its correction, so both places that build hardware_details
+# (this endpoint and the device list below) apply it identically.
+_HARDWARE_OVERRIDE_COLUMNS = {
+    "cpu": "cpu_override",
+    "ram": "ram_override",
+    "disk": "disk_override",
+    "serial_number": "serial_number_override",
+    "manufacturer": "manufacturer_override",
+    "model": "device_model_override",
+}
+
+
+def _with_hardware_overrides(hardware_details: dict, device_id: str) -> dict:
+    """
+    A human correction of a Hardware Specification field, laid over what the
+    agent read — the same precedence `asset_tag`/`location_info` already use
+    against `asset_metadata`, extended to the fields Hardware Specification
+    shows. Applied here rather than in the frontend so every reader of this
+    data (the web app today, anything else tomorrow) sees the same corrected
+    value with no merging logic of its own.
+    """
+    metadata = legacy_db.get_asset_metadata(device_id)
+    if not metadata:
+        return hardware_details
+
+    corrected = dict(hardware_details)
+    for field, column in _HARDWARE_OVERRIDE_COLUMNS.items():
+        override = (metadata.get(column) or "").strip()
+        if override:
+            corrected[field] = override
+    return corrected
 
 
 @router.get("/api/software/{device_id}")
@@ -126,7 +220,7 @@ def get_software_for_device(device_id: str):
         "bitlocker":          latest_data.get("bitlocker") or "Unknown",
         "secure_boot":        latest_data.get("secure_boot") or "Unknown",
         "tpm":                latest_data.get("tpm") or "Unknown",
-        "hardware_details":   {
+        "hardware_details":   _with_hardware_overrides({
             **{k: latest_data.get(k) for k in
                ("cpu", "ram", "disk", "serial_number", "manufacturer")},
             # Audits collected before the agent's $model clobber was fixed stored a
@@ -134,7 +228,7 @@ def get_software_for_device(device_id: str):
             "model": resolve_machine_model(latest_data.get("model"),
                                            latest_data.get("mobo_product"),
                                            latest_data.get("computer_name")),
-        },
+        }, device_id),
         "asset_tag":          latest_data.get("asset_tag") or "",
         "location_info":      latest_data.get("location_info") or "",
         "device_type":        latest_data.get("device_type") or "",

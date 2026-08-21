@@ -1,3 +1,5 @@
+import re
+
 def clean_string(value, fallback=""):
     if value is None:
         return fallback
@@ -20,6 +22,41 @@ _BLANK_VALUES = ("", "unknown", "n/a", "none", "null")
 def is_blank(value) -> bool:
     """True for empty values and for the placeholders agents write when a probe fails."""
     return clean_string(value, "").strip().lower() in _BLANK_VALUES
+
+
+_MONTHS = {
+    "jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06",
+    "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+}
+
+
+def execution_day(raw) -> str | None:
+    """
+    An audit's `execution_datetime` as a `YYYY-MM-DD` day, or None when it
+    cannot be read.
+
+    Nearly every row is `2026-07-27 16:16:19`, plain to slice — but the column
+    is text, not a real timestamp, and one older agent format instead writes
+    `27-Jul-2026_18:02:00`. A bare slice reads that row's day as garbage
+    (`27-Jul-202`) rather than the 27th it means, so both shapes are matched
+    explicitly instead of assuming every row looks like the common case.
+    """
+    value = clean_string(raw, "").strip()
+    if not value:
+        return None
+
+    iso = re.match(r"^(\d{4})-(\d{2})-(\d{2})", value)
+    if iso:
+        return iso.group(0)
+
+    spelled = re.match(r"^(\d{1,2})-([A-Za-z]{3})-(\d{4})", value)
+    if spelled:
+        day, month_name, year = spelled.groups()
+        month = _MONTHS.get(month_name.lower())
+        if month:
+            return f"{year}-{month}-{day.zfill(2)}"
+
+    return None
 
 
 def is_identifiable_audit(row) -> bool:

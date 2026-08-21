@@ -24,6 +24,7 @@ from backend.routers import (
     lifecycle,
     registered_devices,
     report_pins,
+    row_overrides,
     saved_searches,
     scripts,
     view_preferences,
@@ -106,6 +107,7 @@ app.include_router(registered_devices.router, tags=["Inventory: Registered Devic
 app.include_router(view_preferences.router, tags=["View Preferences"])
 app.include_router(saved_searches.router, tags=["Saved Searches"])
 app.include_router(report_pins.router, tags=["Report Pins"])
+app.include_router(row_overrides.router, tags=["Row Field Overrides"])
 app.include_router(dashboard.router, tags=["Dashboard"])
 
 # Catch-all static mount for the frontend SPA — must stay last so it never
